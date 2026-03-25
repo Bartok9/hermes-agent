@@ -3927,7 +3927,20 @@ class HermesCLI:
                 if not response and result and result.get("error"):
                     response = f"Error: {result['error']}"
 
-                # Display result in the CLI (thread-safe via patch_stdout)
+                # Display result in the CLI (thread-safe via patch_stdout).
+                # Temporarily hide status bar and clear current line to prevent
+                # layout corruption when spinner is animating (#2718).
+                _status_was_visible = getattr(self, "_status_bar_visible", True)
+                if hasattr(self, "_status_bar_visible"):
+                    self._status_bar_visible = False
+                # Clear any spinner remnants from current line
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
+                if self._app:
+                    self._app.invalidate()
+                    import time as _tmod
+                    _tmod.sleep(0.05)  # let TUI settle before printing
+
                 print()
                 ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
                 _cprint(f"  ✅ Background task #{task_num} complete")
@@ -3963,9 +3976,28 @@ class HermesCLI:
                     sys.stdout.write("\a")
                     sys.stdout.flush()
 
+                # Restore status bar visibility (#2718)
+                if hasattr(self, "_status_bar_visible"):
+                    self._status_bar_visible = _status_was_visible
+
             except Exception as e:
+                # Same TUI coordination as success path (#2718)
+                _status_was_visible = getattr(self, "_status_bar_visible", True)
+                if hasattr(self, "_status_bar_visible"):
+                    self._status_bar_visible = False
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
+                if self._app:
+                    self._app.invalidate()
+                    import time as _tmod
+                    _tmod.sleep(0.05)
+
                 print()
                 _cprint(f"  ❌ Background task #{task_num} failed: {e}")
+
+                # Restore status bar visibility (#2718)
+                if hasattr(self, "_status_bar_visible"):
+                    self._status_bar_visible = _status_was_visible
             finally:
                 self._background_tasks.pop(task_id, None)
                 if self._app:
