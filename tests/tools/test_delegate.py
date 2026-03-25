@@ -877,5 +877,80 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["base_url"], parent.base_url)
 
 
+class TestSubagentBudgetIsolation(unittest.TestCase):
+    """Tests for subagent iteration budget isolation (#2873).
+
+    Subagents should get their own iteration budget based on their max_iterations,
+    NOT inherit the parent's partially-consumed budget.
+    """
+
+    @patch("run_agent.AIAgent")
+    def test_subagent_gets_own_budget(self, MockAgent):
+        """Subagent receives iteration_budget=None so AIAgent creates a fresh budget."""
+        mock_child = MagicMock()
+        mock_child.run_conversation.return_value = {
+            "final_response": "done", "completed": True, "api_calls": 5
+        }
+        MockAgent.return_value = mock_child
+
+        parent = _make_mock_parent()
+        # Simulate parent having consumed some iterations
+        from run_agent import IterationBudget
+        parent.iteration_budget = IterationBudget(max_total=90)
+        parent.iteration_budget._used = 60  # Parent has used 60 of 90
+
+        delegate_task(goal="Test task", max_iterations=50, parent_agent=parent)
+
+        # Verify AIAgent was called with iteration_budget=None
+        _, kwargs = MockAgent.call_args
+        self.assertIsNone(kwargs.get("iteration_budget"))
+        # This means AIAgent.__init__ will create IterationBudget(50) for the child,
+        # giving it a full 50 iterations regardless of parent's consumed budget.
+
+    @patch("run_agent.AIAgent")
+    def test_max_iterations_passed_through(self, MockAgent):
+        """The max_iterations parameter is passed to child agent."""
+        mock_child = MagicMock()
+        mock_child.run_conversation.return_value = {
+            "final_response": "done", "completed": True, "api_calls": 1
+        }
+        MockAgent.return_value = mock_child
+
+        parent = _make_mock_parent()
+
+        delegate_task(goal="Test task", max_iterations=25, parent_agent=parent)
+
+        _, kwargs = MockAgent.call_args
+        self.assertEqual(kwargs["max_iterations"], 25)
+
+    @patch("run_agent.AIAgent")
+    def test_parallel_subagents_independent_budgets(self, MockAgent):
+        """Multiple parallel subagents each get their own budget."""
+        mock_child = MagicMock()
+        mock_child.run_conversation.return_value = {
+            "final_response": "done", "completed": True, "api_calls": 10
+        }
+        MockAgent.return_value = mock_child
+
+        parent = _make_mock_parent()
+        from run_agent import IterationBudget
+        parent.iteration_budget = IterationBudget(max_total=90)
+        parent.iteration_budget._used = 30
+
+        tasks = [
+            {"goal": "Task A"},
+            {"goal": "Task B"},
+            {"goal": "Task C"},
+        ]
+        delegate_task(tasks=tasks, max_iterations=50, parent_agent=parent)
+
+        # All 3 subagents should get iteration_budget=None
+        self.assertEqual(MockAgent.call_count, 3)
+        for call in MockAgent.call_args_list:
+            _, kwargs = call
+            self.assertIsNone(kwargs.get("iteration_budget"))
+            self.assertEqual(kwargs["max_iterations"], 50)
+
+
 if __name__ == "__main__":
     unittest.main()
