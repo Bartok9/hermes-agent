@@ -367,6 +367,65 @@ def run_doctor(args):
             pass
 
     # =========================================================================
+    # Check: Provider endpoint configuration (OPENAI_BASE_URL conflicts)
+    # =========================================================================
+    print()
+    print(color("◆ Provider Endpoint Configuration", Colors.CYAN, Colors.BOLD))
+
+    # Check for OPENAI_BASE_URL vs config.yaml base_url conflict (#5161)
+    env_base_url = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
+    config_base_url = ""
+    try:
+        config_path = HERMES_HOME / "config.yaml"
+        if config_path.exists():
+            with open(config_path) as f:
+                raw_config = yaml.safe_load(f) or {}
+            config_base_url = (raw_config.get("model", {}).get("base_url") or "").rstrip("/")
+    except Exception:
+        pass
+
+    if env_base_url and config_base_url:
+        if env_base_url != config_base_url:
+            check_warn(
+                "OPENAI_BASE_URL conflicts with config.yaml base_url",
+                f"(env: {env_base_url[:40]}... vs config: {config_base_url[:40]}...)"
+            )
+            check_info("Auxiliary clients (compression, vision, subagents) may route to wrong endpoint")
+            check_info(f"Fix: comment out OPENAI_BASE_URL in {_DHH}/.env or align endpoints")
+            if should_fix:
+                # Comment out OPENAI_BASE_URL in .env
+                env_file = HERMES_HOME / ".env"
+                if env_file.exists():
+                    try:
+                        content = env_file.read_text()
+                        lines = content.splitlines()
+                        new_lines = []
+                        modified = False
+                        for line in lines:
+                            stripped = line.strip()
+                            if stripped.startswith("OPENAI_BASE_URL="):
+                                new_lines.append(f"# {line}  # commented by hermes doctor --fix")
+                                modified = True
+                            else:
+                                new_lines.append(line)
+                        if modified:
+                            env_file.write_text("\n".join(new_lines) + "\n")
+                            check_ok(f"Commented out OPENAI_BASE_URL in {_DHH}/.env")
+                            fixed_count += 1
+                    except Exception as e:
+                        check_warn(f"Could not fix .env: {e}")
+            else:
+                issues.append(f"OPENAI_BASE_URL in .env conflicts with base_url in config.yaml — run 'hermes doctor --fix'")
+        else:
+            check_ok("OPENAI_BASE_URL matches config.yaml base_url")
+    elif env_base_url and not config_base_url:
+        check_ok(f"OPENAI_BASE_URL set (custom endpoint: {env_base_url[:50]}...)")
+    elif config_base_url:
+        check_ok(f"base_url configured in config.yaml")
+    else:
+        check_ok("Using provider defaults (no custom endpoint)")
+
+    # =========================================================================
     # Check: Auth providers
     # =========================================================================
     print()
