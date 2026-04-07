@@ -509,68 +509,84 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._set_fatal_error("telegram_token_lock", message, retryable=False)
                 return False
 
-            # Build the application
-            builder = Application.builder().token(self.config.token)
-            fallback_ips = self._fallback_ips()
-            if not fallback_ips:
-                fallback_ips = await discover_fallback_ips()
-                logger.info(
-                    "[%s] Auto-discovered Telegram fallback IPs: %s",
-                    self.name,
-                    ", ".join(fallback_ips),
-                )
-            if fallback_ips:
-                logger.info(
-                    "[%s] Telegram fallback IPs active: %s",
-                    self.name,
-                    ", ".join(fallback_ips),
-                )
-                transport = TelegramFallbackTransport(fallback_ips)
-                request = HTTPXRequest(httpx_kwargs={"transport": transport})
-                get_updates_request = HTTPXRequest(httpx_kwargs={"transport": transport})
-                builder = builder.request(request).get_updates_request(get_updates_request)
-            self._app = builder.build()
-            self._bot = self._app.bot
-            
-            # Register handlers
-            self._app.add_handler(TelegramMessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                self._handle_text_message
-            ))
-            self._app.add_handler(TelegramMessageHandler(
-                filters.COMMAND,
-                self._handle_command
-            ))
-            self._app.add_handler(TelegramMessageHandler(
-                filters.LOCATION | getattr(filters, "VENUE", filters.LOCATION),
-                self._handle_location_message
-            ))
-            self._app.add_handler(TelegramMessageHandler(
-                filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL | filters.Sticker.ALL,
-                self._handle_media_message
-            ))
-            # Handle inline keyboard button callbacks (update prompts)
-            self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
-            
-            # Start polling — retry initialize() for transient TLS resets
+            # Start polling — retry initialize() for cold-boot DNS races + transient TLS resets
+            # At cold boot, network stack may not be ready for 10-30+ seconds.
+            # Re-discover fallback IPs on each attempt since DoH queries may also fail
+            # initially but succeed once the network comes up.
             try:
                 from telegram.error import NetworkError, TimedOut
             except ImportError:
                 NetworkError = TimedOut = OSError  # type: ignore[misc,assignment]
-            _max_connect = 3
+
+            _max_connect = 8  # Covers cold-boot network stack delay (~60s total)
+            _backoff_cap = 15  # seconds
+
             for _attempt in range(_max_connect):
                 try:
+                    # Re-discover fallback IPs on each attempt — DoH may be down at
+                    # cold boot but recover before we exhaust our retry budget.
+                    fallback_ips = self._fallback_ips()
+                    if not fallback_ips:
+                        fallback_ips = await discover_fallback_ips()
+                        if _attempt == 0:
+                            logger.info(
+                                "[%s] Auto-discovered Telegram fallback IPs: %s",
+                                self.name,
+                                ", ".join(fallback_ips),
+                            )
+
+                    # Build the application fresh on each attempt
+                    builder = Application.builder().token(self.config.token)
+                    if fallback_ips:
+                        if _attempt == 0:
+                            logger.info(
+                                "[%s] Telegram fallback IPs active: %s",
+                                self.name,
+                                ", ".join(fallback_ips),
+                            )
+                        transport = TelegramFallbackTransport(fallback_ips)
+                        request = HTTPXRequest(httpx_kwargs={"transport": transport})
+                        get_updates_request = HTTPXRequest(httpx_kwargs={"transport": transport})
+                        builder = builder.request(request).get_updates_request(get_updates_request)
+
+                    self._app = builder.build()
+                    self._bot = self._app.bot
+
+                    # Register handlers
+                    self._app.add_handler(TelegramMessageHandler(
+                        filters.TEXT & ~filters.COMMAND,
+                        self._handle_text_message
+                    ))
+                    self._app.add_handler(TelegramMessageHandler(
+                        filters.COMMAND,
+                        self._handle_command
+                    ))
+                    self._app.add_handler(TelegramMessageHandler(
+                        filters.LOCATION | getattr(filters, "VENUE", filters.LOCATION),
+                        self._handle_location_message
+                    ))
+                    self._app.add_handler(TelegramMessageHandler(
+                        filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL | filters.Sticker.ALL,
+                        self._handle_media_message
+                    ))
+                    # Handle inline keyboard button callbacks (update prompts)
+                    self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
+
                     await self._app.initialize()
                     break
                 except (NetworkError, TimedOut, OSError) as init_err:
                     if _attempt < _max_connect - 1:
-                        wait = 2 ** _attempt
+                        wait = min(2 ** _attempt, _backoff_cap)  # 1,2,4,8,15,15,15
                         logger.warning(
                             "[%s] Connect attempt %d/%d failed: %s — retrying in %ds",
                             self.name, _attempt + 1, _max_connect, init_err, wait,
                         )
                         await asyncio.sleep(wait)
                     else:
+                        logger.error(
+                            "[%s] Exhausted %d connect attempts, giving up: %s",
+                            self.name, _max_connect, init_err,
+                        )
                         raise
             await self._app.start()
 
