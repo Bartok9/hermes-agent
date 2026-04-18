@@ -202,6 +202,36 @@ class TestMemoryManager:
         assert p1.prefetch_queries == ["what do you know?"]
         assert p2.prefetch_queries == ["what do you know?"]
 
+    def test_prefetch_deduplicates_shared_memory_lines_across_providers(self):
+        mgr = MemoryManager()
+        p1 = FakeMemoryProvider("builtin")
+        p1._prefetch_result = "## Builtin Memory\n- User likes Python\n- Prefers dark mode"
+        p2 = FakeMemoryProvider("external")
+        p2._prefetch_result = "[MemPalace Memory]\n\n1. User likes Python\n2. Uses Telegram"
+        mgr.add_provider(p1)
+        mgr.add_provider(p2)
+
+        result = mgr.prefetch_all("query")
+        assert result.count("User likes Python") == 1
+        assert "Prefers dark mode" in result
+        assert "Uses Telegram" in result
+        assert "## Builtin Memory" in result
+        assert "[MemPalace Memory]" in result
+
+    def test_prefetch_keeps_distinct_lines_when_only_formatting_differs(self):
+        mgr = MemoryManager()
+        p1 = FakeMemoryProvider("builtin")
+        p1._prefetch_result = "## Builtin Memory\n- User likes Python for scripting"
+        p2 = FakeMemoryProvider("external")
+        p2._prefetch_result = "## External Memory\n- User likes Python for backend services"
+        mgr.add_provider(p1)
+        mgr.add_provider(p2)
+
+        result = mgr.prefetch_all("query")
+        assert "User likes Python for scripting" in result
+        assert "User likes Python for backend services" in result
+        assert result.count("User likes Python") == 2
+
     def test_prefetch_skips_empty(self):
         mgr = MemoryManager()
         p1 = FakeMemoryProvider("builtin")

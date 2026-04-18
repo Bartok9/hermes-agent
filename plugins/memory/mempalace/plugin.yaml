@@ -1,0 +1,42 @@
+name: mempalace
+version: "2.0.0-foundation"
+description: "MemPalace — modular local-first AI memory provider with configurable collection naming, room scoping, and structured metadata."
+author: "hermes-plugin"
+
+config:
+  - key: palace_path
+    description: "Root directory for MemPalace data (ChromaDB + knowledge graph). Defaults to $HERMES_HOME/mempalace"
+    default: ""
+    required: false
+  - key: wing
+    description: "Wing name for organizing memories (default: conversations)"
+    default: "conversations"
+    required: false
+  - key: n_results
+    description: "Default semantic search result count (default: 5)"
+    default: 5
+    required: false
+  - key: tool_max_results
+    description: "Upper bound for tool-driven result counts (default: 20)"
+    default: 20
+    required: false
+  - key: enable_kg
+    description: "Enable knowledge graph support when available"
+    default: true
+    required: false
+  - key: collection_name
+    description: "Explicit Chroma collection name. Overrides collection_template when set."
+    default: ""
+    required: false
+  - key: collection_template
+    description: "Collection naming template using {user_id}, {platform}, {session_id}, {agent_id}."
+    default: "hermes-{platform}-{user_id}"
+    required: false
+  - key: room_strategy
+    description: "How rooms are derived when tool callers do not specify a room."
+    default: "platform_session"
+    required: false
+  - key: fixed_room
+    description: "Room name used when room_strategy=fixed."
+    default: "memory"
+    required: false

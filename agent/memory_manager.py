@@ -27,7 +27,11 @@ from __future__ import annotations
 
 import logging
 import re
+<<<<<<< HEAD
 import inspect
+=======
+from difflib import SequenceMatcher
+>>>>>>> 2ec8e9187 (feat: add MemPalace memory provider plugin)
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
@@ -299,7 +303,83 @@ class MemoryManager:
                     "Memory provider '%s' prefetch failed (non-fatal): %s",
                     provider.name, e,
                 )
-        return "\n\n".join(parts)
+        return self._merge_prefetch_parts(parts)
+
+    def _merge_prefetch_parts(self, parts: List[str]) -> str:
+        """Merge provider prefetch blocks while deduplicating repeated memory lines."""
+        merged_blocks = []
+        seen_content: List[str] = []
+
+        for part in parts:
+            block = self._deduplicate_prefetch_block(part, seen_content)
+            if block:
+                merged_blocks.append(block)
+
+        return "\n\n".join(merged_blocks)
+
+    def _deduplicate_prefetch_block(self, block: str, seen_content: List[str]) -> str:
+        headers: List[str] = []
+        body: List[str] = []
+
+        for raw_line in block.splitlines():
+            line = raw_line.rstrip()
+            if not line.strip():
+                if body and body[-1] != "":
+                    body.append("")
+                continue
+
+            normalized = self._normalize_prefetch_line(line)
+            if self._is_prefetch_header_line(line, normalized):
+                headers.append(line)
+                continue
+
+            if any(self._prefetch_lines_match(normalized, prior) for prior in seen_content):
+                continue
+
+            seen_content.append(normalized)
+            body.append(line)
+
+        while body and body[-1] == "":
+            body.pop()
+
+        if not body:
+            return ""
+
+        lines = list(headers)
+        if headers and body:
+            lines.append("")
+        lines.extend(body)
+        return "\n".join(lines)
+
+    def _is_prefetch_header_line(self, line: str, normalized: str) -> bool:
+        stripped = line.strip()
+        if not normalized:
+            return True
+        if stripped.endswith(":"):
+            return True
+        if stripped.startswith(("#", "[")):
+            return True
+        return False
+
+    def _normalize_prefetch_line(self, line: str) -> str:
+        normalized = line.strip()
+        normalized = re.sub(r"^[-*•]+\s*", "", normalized)
+        normalized = re.sub(r"^\d+[.)]\s*", "", normalized)
+        normalized = re.sub(r"^\[[^\]]+\]\s*", "", normalized)
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = re.sub(r"[`*_#>]", "", normalized)
+        normalized = re.sub(r"[^\w\s\u4e00-\u9fff]", "", normalized.casefold())
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized.strip()
+
+    def _prefetch_lines_match(self, left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+        if len(left) >= 24 and len(right) >= 24 and SequenceMatcher(a=left, b=right).ratio() >= 0.96:
+            return True
+        return False
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
