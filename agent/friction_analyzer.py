@@ -79,6 +79,34 @@ FRICTION_PATTERNS = {
 }
 
 
+
+# ─── Noisy context suppression ───────────────────────────────────────────────
+# These patterns indicate expected high-error workflows (Docker builds, npm
+# installs, test runs) where error_loop detection would produce false positives.
+# Sessions containing these context markers suppress error_loop scoring.
+
+NOISY_CONTEXT_PATTERNS = [
+    "docker build",
+    "docker-compose",
+    "npm install",
+    "npm ci",
+    "npm rebuild",
+    "yarn install",
+    "pip install",
+    "uv sync",
+    "cargo build",
+    "go build",
+    "pytest",
+    "running tests",
+    "test suite",
+    "running npm",
+    "reinstall",
+    "compiling",
+    "building image",
+    "pulling image",
+    "running migrations",
+]
+
 # ─── Data classes ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -355,12 +383,14 @@ class FrictionAnalyzer:
         # ── Check each pattern ────────────────────────────────────────────────
 
         # 1. Error loop detection
+        # Skip if this looks like a known noisy context (Docker builds, npm installs, etc.)
+        is_noisy_context = any(pat in full_text for pat in NOISY_CONTEXT_PATTERNS)
         error_keywords = FRICTION_PATTERNS["error_loop"]["keywords"]
         error_count = sum(
             1 for t in texts
             if any(kw in t for kw in error_keywords)
         )
-        if error_count >= FRICTION_PATTERNS["error_loop"]["threshold"]:
+        if not is_noisy_context and error_count >= FRICTION_PATTERNS["error_loop"]["threshold"]:
             events.append(FrictionEvent(
                 session_id=session_id,
                 timestamp=started_at,

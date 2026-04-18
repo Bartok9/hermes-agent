@@ -105,3 +105,33 @@ def test_all_patterns_have_description_and_weight():
 
 def test_pattern_weights_are_positive():
     assert all(p["weight"] > 0 for p in FRICTION_PATTERNS.values())
+
+def test_error_loop_suppressed_in_noisy_context():
+    """Docker builds and npm installs should not trigger error_loop false positives."""
+    from agent.friction_analyzer import NOISY_CONTEXT_PATTERNS
+    a = FrictionAnalyzer()
+    # Simulate a docker build session with expected error output
+    session = sess("docker", [
+        "docker build -t myapp .",
+        "Step 3/12: RUN npm install",
+        "Error: peer dependency conflict",
+        "Error: peer dependency conflict",
+        "Error: peer dependency conflict",
+        "Build complete.",
+    ])
+    evs = a._analyze_session(session)
+    # Should NOT fire error_loop because "docker build" / "npm install" are noisy context
+    assert not any(e.category == "error_loop" for e in evs)
+
+def test_error_loop_still_fires_outside_noisy_context():
+    """Real error loops outside build contexts should still be detected."""
+    a = FrictionAnalyzer()
+    session = sess("realerr", [
+        "Calling external API...",
+        "Error: connection refused",
+        "Error: connection refused",
+        "Error: connection refused",
+    ])
+    evs = a._analyze_session(session)
+    assert any(e.category == "error_loop" for e in evs)
+
