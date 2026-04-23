@@ -320,8 +320,18 @@ class CopilotACPClient:
         timeout: float | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
+        stream: bool = False,
         **_: Any,
     ) -> Any:
+        if stream:
+            # The copilot-acp backend communicates over a subprocess stdio
+            # JSON-RPC channel and does not support incremental chunk delivery.
+            # Raising here triggers the agent loop's existing "stream not
+            # supported" recovery path (run_agent.py _interruptible_streaming_-
+            # api_call), which sets _disable_streaming=True and retries the
+            # same request without streaming so the conversation continues
+            # uninterrupted.
+            raise NotImplementedError("stream not supported for copilot-acp provider")
         prompt_text = _format_messages_as_prompt(
             messages or [],
             model=model,
