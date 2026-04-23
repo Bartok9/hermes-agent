@@ -78,9 +78,11 @@ AUTHOR_MAP = {
     "258577966+voidborne-d@users.noreply.github.com": "voidborne-d",
     "sir_even@icloud.com": "sirEven",
     "36056348+sirEven@users.noreply.github.com": "sirEven",
+    # Bartok9 (Bartok AI agent — danielrpike9@gmail.com)
+    "danielrpike9@gmail.com": "Bartok9",
+    "259807879+Bartok9@users.noreply.github.com": "Bartok9",
     "70424851+insecurejezza@users.noreply.github.com": "insecurejezza",
     "254021826+dodo-reach@users.noreply.github.com": "dodo-reach",
-    "259807879+Bartok9@users.noreply.github.com": "Bartok9",
     "241404605+MestreY0d4-Uninter@users.noreply.github.com": "MestreY0d4-Uninter",
     "268667990+Roy-oss1@users.noreply.github.com": "Roy-oss1",
     "27917469+nosleepcassette@users.noreply.github.com": "nosleepcassette",
