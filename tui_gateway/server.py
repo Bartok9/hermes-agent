@@ -3025,6 +3025,11 @@ def _(rid, params: dict) -> dict:
                         "name": cmds[key].get("name", name),
                     },
                 )
+            return _err(
+                rid,
+                5030,
+                f"Failed to load skill: {cmds[key].get('name', name)}",
+            )
     except Exception:
         pass
 
@@ -3111,6 +3116,7 @@ def _(rid, params: dict) -> dict:
             )
             if msg:
                 return _ok(rid, {"type": "send", "message": msg})
+            return _err(rid, 5030, "Failed to load the bundled /plan skill")
         except Exception as e:
             return _err(rid, 5030, f"plan skill failed: {e}")
 

@@ -3820,6 +3820,12 @@ class GatewayRunner:
                     if msg:
                         event.text = msg
                         # Fall through to normal message processing with skill content
+                    else:
+                        _disp = _skill_name or command
+                        return (
+                            f"Failed to load skill **{_disp}**. "
+                            "Check SKILL.md and any required setup, then try again."
+                        )
                 else:
                     # Not an active skill — check if it's a known-but-disabled or
                     # uninstalled skill and give actionable guidance.
