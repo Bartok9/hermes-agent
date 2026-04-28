@@ -631,6 +631,14 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     if explicit_provider:
         return model, explicit_provider
 
+    # Honour HERMES_INFERENCE_PROVIDER when set by /model — it represents
+    # the user's explicit provider choice and must not be overridden by
+    # static-catalog detection (which can match native provider names by
+    # coincidence, e.g. "deepseek-v4-pro" → native deepseek).
+    inference_provider = os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip()
+    if inference_provider:
+        return model, inference_provider
+
     explicit_model = (
         os.environ.get("HERMES_MODEL", "")
         or os.environ.get("HERMES_INFERENCE_MODEL", "")
@@ -648,7 +656,6 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
                 if isinstance(cfg, dict)
                 else ""
             )
-            or os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip().lower()
             or "auto"
         )
         detected = detect_static_provider_for_model(explicit_model, current_provider)

@@ -187,16 +187,34 @@ def test_startup_runtime_uses_tui_provider_env(monkeypatch):
     assert server._resolve_startup_runtime() == ("nous/hermes-test", "nous")
 
 
-def test_startup_runtime_does_not_treat_inference_provider_as_explicit(monkeypatch):
-    monkeypatch.setenv("HERMES_MODEL", "nous/hermes-test")
+def test_startup_runtime_honours_inference_provider_env(monkeypatch):
+    """HERMES_INFERENCE_PROVIDER set by /model must be honoured directly.
+
+    This prevents static-catalog detection from overriding the user's
+    explicit provider choice (e.g. custom:xuanji → native deepseek).
+    Fixes #16857.
+    """
+    monkeypatch.setenv("HERMES_MODEL", "deepseek-v4-pro")
     monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
-    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "nous")
+    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "custom:xuanji")
+    # static detection must NOT be called — early return should happen first
     monkeypatch.setattr(
         "hermes_cli.models.detect_static_provider_for_model",
-        lambda model, provider: None,
+        lambda model, provider: (_ for _ in ()).throw(
+            AssertionError("static detection should not run when HERMES_INFERENCE_PROVIDER is set")
+        ),
     )
 
-    assert server._resolve_startup_runtime() == ("nous/hermes-test", None)
+    assert server._resolve_startup_runtime() == ("deepseek-v4-pro", "custom:xuanji")
+
+
+def test_startup_runtime_inference_provider_does_not_override_tui_provider(monkeypatch):
+    """HERMES_TUI_PROVIDER takes precedence over HERMES_INFERENCE_PROVIDER."""
+    monkeypatch.setenv("HERMES_MODEL", "nous/hermes-test")
+    monkeypatch.setenv("HERMES_TUI_PROVIDER", "nous")
+    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "custom:other")
+
+    assert server._resolve_startup_runtime() == ("nous/hermes-test", "nous")
 
 
 def test_startup_runtime_detects_provider_for_model_env(monkeypatch):
