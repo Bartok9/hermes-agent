@@ -139,3 +139,142 @@ async def test_new_command_only_clears_own_session():
     assert other_key in runner._session_reasoning_overrides
     assert session_key not in runner._pending_model_notes
     assert other_key in runner._pending_model_notes
+
+
+@pytest.mark.asyncio
+async def test_new_command_completes_when_pinned_model_invalid_during_cleanup():
+    """Regression for #6426.
+
+    When a session was pinned to a model that the user has since removed
+    from ``config.yaml`` / ``.env``, ``shutdown_memory_provider`` (called
+    on /new before reset_session) makes a summarisation LLM call to that
+    invalid model and the SDK raises a ``BadRequestError``-class
+    exception.  Previously this exception was silently swallowed by a
+    broad ``except Exception: pass`` in ``_cleanup_agent_resources`` and,
+    when combined with the upstream timeout/deadlock surface, left the
+    user with no signal that their long-term memory wasn't summarized.
+
+    This test confirms two guarantees:
+
+    1. The reset still completes (returns a reply, the session_store
+       reset_session call still fires).
+    2. The user is told *why* the summary was skipped — the warning text
+       is prepended to the reset response so the user knows the previous
+       model is no longer available and can fix their config.
+    """
+    import threading
+
+    runner = _make_runner()
+    runner._agent_cache_lock = threading.Lock()
+
+    # Synthetic exception class whose ``__name__`` matches what the
+    # OpenAI / Anthropic SDKs actually raise on an unknown model.  We
+    # don't import the real SDKs — ``_cleanup_agent_resources`` matches
+    # by class-name string for exactly that reason (see the
+    # ``_PINNED_MODEL_EXC_NAMES`` frozenset).
+    class BadRequestError(Exception):
+        pass
+
+    mock_agent = MagicMock()
+
+    def _raise_invalid_model(*args, **kwargs):
+        raise BadRequestError("Invalid model: gpt-4o-deleted")
+
+    mock_agent.shutdown_memory_provider = MagicMock(side_effect=_raise_invalid_model)
+    mock_agent._session_messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi back"},
+    ]
+    # ``close()`` is exercised after the memory-provider step in the
+    # cleanup function — make it a no-op so we test the memory-shutdown
+    # path in isolation.
+    mock_agent.close = MagicMock()
+
+    session_key = build_session_key(_make_source())
+    runner._agent_cache = {session_key: mock_agent}
+
+    reply = await runner._handle_reset_command(_make_event("/new"))
+
+    # Reply is an EphemeralReply (str subclass) so we can substring-check.
+    text = str(reply)
+    assert "Could not summarize" in text, (
+        f"Reset response should include the user-visible warning explaining "
+        f"why long-term memory wasn't summarized, got: {text!r}"
+    )
+    assert "no longer available" in text, (
+        f"Warning should explain the pinned model is no longer available, "
+        f"got: {text!r}"
+    )
+    assert "Session reset" in text or "New session" in text, (
+        f"Reset must still surface the normal reset header so the user "
+        f"sees the operation completed, got: {text!r}"
+    )
+
+    # The cleanup call was actually attempted (not skipped) — the broken
+    # memory provider was invoked exactly once.
+    mock_agent.shutdown_memory_provider.assert_called_once_with(
+        mock_agent._session_messages
+    )
+
+    # The reset itself still happened — session_store.reset_session was
+    # called for this session, so the user is no longer pinned to the
+    # broken model on the next message.
+    runner.session_store.reset_session.assert_called_once_with(session_key)
+
+
+@pytest.mark.asyncio
+async def test_new_command_silent_when_cleanup_succeeds():
+    """Companion to the #6426 regression: when cleanup succeeds the reset
+    response must NOT include the warning prefix.  Otherwise every /new
+    on a healthy session would scare the user.
+    """
+    import threading
+
+    runner = _make_runner()
+    runner._agent_cache_lock = threading.Lock()
+
+    mock_agent = MagicMock()
+    mock_agent.shutdown_memory_provider = MagicMock(return_value=None)
+    mock_agent._session_messages = []
+    mock_agent.close = MagicMock()
+
+    session_key = build_session_key(_make_source())
+    runner._agent_cache = {session_key: mock_agent}
+
+    reply = await runner._handle_reset_command(_make_event("/new"))
+    text = str(reply)
+
+    assert "Could not summarize" not in text
+    assert "no longer available" not in text
+    assert "Session reset" in text or "New session" in text
+
+
+@pytest.mark.asyncio
+async def test_new_command_silent_for_non_model_cleanup_errors():
+    """Companion: unrelated cleanup failures (network blip, plugin bug)
+    must NOT produce the model-specific warning — those stay in debug
+    logs only, matching the prior best-effort cleanup contract.
+    """
+    import threading
+
+    runner = _make_runner()
+    runner._agent_cache_lock = threading.Lock()
+
+    mock_agent = MagicMock()
+    mock_agent.shutdown_memory_provider = MagicMock(
+        side_effect=RuntimeError("plugin internal failure")
+    )
+    mock_agent._session_messages = []
+    mock_agent.close = MagicMock()
+
+    session_key = build_session_key(_make_source())
+    runner._agent_cache = {session_key: mock_agent}
+
+    reply = await runner._handle_reset_command(_make_event("/new"))
+    text = str(reply)
+
+    # No model-specific warning for generic exceptions
+    assert "Could not summarize" not in text
+    assert "no longer available" not in text
+    # But the reset still completes
+    assert "Session reset" in text or "New session" in text

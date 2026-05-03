@@ -2404,10 +2404,31 @@ class GatewayRunner:
                 pass
             self._cleanup_agent_resources(agent)
 
-    def _cleanup_agent_resources(self, agent: Any) -> None:
-        """Best-effort cleanup for temporary or cached agent instances."""
+    # Exception class names (matched by ``type(exc).__name__``) that we
+    # treat as "the session's pinned model has become invalid" during
+    # cleanup.  Matching by name avoids hard-importing optional SDK
+    # exception types (openai, anthropic) here.  See #6426.
+    _PINNED_MODEL_EXC_NAMES = frozenset({
+        "BadRequestError",
+        "NotFoundError",
+        "AuthenticationError",
+        "PermissionDeniedError",
+    })
+
+    def _cleanup_agent_resources(self, agent: Any) -> Optional[str]:
+        """Best-effort cleanup for temporary or cached agent instances.
+
+        Returns a user-facing warning string when the memory-provider
+        shutdown step fails with a known model/auth error class — typically
+        because the session was pinned to a model the user has since removed
+        from ``config.yaml`` / ``.env`` (issue #6426).  Returns ``None``
+        when cleanup succeeded or when the failure was something else
+        (network blip, plugin bug, etc.).  Callers that don't surface a
+        user-visible message can ignore the return value.
+        """
         if agent is None:
-            return
+            return None
+        cleanup_warning: Optional[str] = None
         try:
             if hasattr(agent, "shutdown_memory_provider"):
                 # Pass the agent's own conversation transcript so memory
@@ -2425,8 +2446,29 @@ class GatewayRunner:
                     agent.shutdown_memory_provider(session_messages)
                 else:
                     agent.shutdown_memory_provider()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Distinguish "your pinned model is gone" from other plugin
+            # failures so /new can tell the user *why* their long-term
+            # memory wasn't summarized into the new session, instead of
+            # silently swallowing the error (the prior behaviour, which
+            # made the deadlock in #6426 invisible to users).  All other
+            # exception classes stay silent — cleanup is best-effort.
+            exc_class = type(exc).__name__
+            if exc_class in self._PINNED_MODEL_EXC_NAMES:
+                logger.warning(
+                    "Memory provider shutdown hit %s — the session's pinned "
+                    "model may no longer be valid; proceeding with reset. (%s)",
+                    exc_class, exc,
+                )
+                cleanup_warning = (
+                    "⚠️ Could not summarize this session into long-term "
+                    "memory before resetting (the previous turn's model is "
+                    "no longer available). Starting fresh anyway."
+                )
+            else:
+                logger.debug(
+                    "Memory provider shutdown failed (best-effort): %s", exc,
+                )
         # Close tool resources (terminal sandboxes, browser daemons,
         # background processes, httpx clients) to prevent zombie
         # process accumulation.
@@ -2444,6 +2486,7 @@ class GatewayRunner:
             cleanup_stale_async_clients()
         except Exception:
             pass
+        return cleanup_warning
 
     _STUCK_LOOP_THRESHOLD = 3  # restarts while active before auto-suspend
     _STUCK_LOOP_FILE = ".restart_failure_counts"
@@ -6764,13 +6807,17 @@ class GatewayRunner:
         # Close tool resources on the old agent (terminal sandboxes, browser
         # daemons, background processes) before evicting from cache.
         # Guard with getattr because test fixtures may skip __init__.
+        # Capture any user-facing warning from cleanup (e.g. the session's
+        # pinned model is no longer valid — issue #6426) so we can prepend
+        # it to the reset response below.
+        cleanup_warning: Optional[str] = None
         _cache_lock = getattr(self, "_agent_cache_lock", None)
         if _cache_lock is not None:
             with _cache_lock:
                 _cached = self._agent_cache.get(session_key)
                 _old_agent = _cached[0] if isinstance(_cached, tuple) else _cached if _cached else None
             if _old_agent is not None:
-                self._cleanup_agent_resources(_old_agent)
+                cleanup_warning = self._cleanup_agent_resources(_old_agent)
         self._evict_cached_agent(session_key)
 
         # Discard any /queue overflow for this session — /new is a
@@ -6860,8 +6907,12 @@ class GatewayRunner:
             _tip_line = ""
 
         if session_info:
-            return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
-        return EphemeralReply(f"{header}{_tip_line}")
+            body = f"{header}\n\n{session_info}{_tip_line}"
+        else:
+            body = f"{header}{_tip_line}"
+        if cleanup_warning:
+            return EphemeralReply(f"{cleanup_warning}\n\n{body}")
+        return EphemeralReply(body)
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show active profile name and home directory."""
