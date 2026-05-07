@@ -27,11 +27,8 @@ from __future__ import annotations
 
 import logging
 import re
-<<<<<<< HEAD
 import inspect
-=======
 from difflib import SequenceMatcher
->>>>>>> 2ec8e9187 (feat: add MemPalace memory provider plugin)
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
