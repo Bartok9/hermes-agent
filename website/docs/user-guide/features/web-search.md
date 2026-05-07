@@ -24,6 +24,7 @@ All three are configured through a single backend selection. Providers are chose
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | ✔ | 1 000 searches/mo |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | — | 1 000 searches/mo |
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | — | Paid |
+| **Brave Search** | `BRAVE_API_KEY` | ✔ | — | — | 2 000 searches/mo |
 
 **Per-capability split:** you can use different providers for search and extract independently — for example SearXNG (free) for search and Firecrawl for extract. See [Per-capability configuration](#per-capability-configuration) below.
 
@@ -185,6 +186,49 @@ web:
 With this config, Hermes uses SearXNG for all search queries and Firecrawl for URL extraction — combining free search with high-quality extraction.
 
 ---
+
+### Brave Search
+
+Brave Search uses its own independent web index — not Google or Bing — making it a **privacy-focused** alternative with a **free tier (2,000 queries/month)**.
+
+Brave Search is **search-only** — `web_extract` and `web_crawl` require a separate extract provider (default: Firecrawl).
+
+#### Setup
+
+**1. Get a free API key:**
+
+Go to [api.search.brave.com/app/keys](https://api.search.brave.com/app/keys) and create an account. The free tier provides 2,000 queries/month with no credit card required.
+
+**2. Set your API key:**
+
+```bash
+# ~/.hermes/.env
+BRAVE_API_KEY=your-key-here
+```
+
+**3. Select Brave as your search backend:**
+
+```yaml
+# ~/.hermes/config.yaml
+web:
+  search_backend: brave
+```
+
+Or select it via the interactive setup:
+
+```bash
+hermes tools
+# Choose: Web Search → Brave Search
+```
+
+**Per-capability config example** — Brave for search, Firecrawl for extract:
+
+```yaml
+web:
+  search_backend: brave
+  extract_backend: firecrawl
+```
+
 
 ### Tavily
 
