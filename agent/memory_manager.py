@@ -27,11 +27,8 @@ from __future__ import annotations
 
 import logging
 import re
-<<<<<<< HEAD
 import inspect
-=======
 from difflib import SequenceMatcher
->>>>>>> 2ec8e9187 (feat: add MemPalace memory provider plugin)
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
@@ -44,22 +41,22 @@ logger = logging.getLogger(__name__)
 # Context fencing helpers
 # ---------------------------------------------------------------------------
 
-_FENCE_TAG_RE = re.compile(r'</?\s*memory-context\s*>', re.IGNORECASE)
+_FENCE_TAG_RE = re.compile(r"</?\s*memory-context\s*>", re.IGNORECASE)
 _INTERNAL_CONTEXT_RE = re.compile(
-    r'<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>',
+    r"<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>",
     re.IGNORECASE,
 )
 _INTERNAL_NOTE_RE = re.compile(
-    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
+    r"\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*",
     re.IGNORECASE,
 )
 
 
 def sanitize_context(text: str) -> str:
     """Strip fence tags, injected context blocks, and system notes from provider output."""
-    text = _INTERNAL_CONTEXT_RE.sub('', text)
-    text = _INTERNAL_NOTE_RE.sub('', text)
-    text = _FENCE_TAG_RE.sub('', text)
+    text = _INTERNAL_CONTEXT_RE.sub("", text)
+    text = _INTERNAL_NOTE_RE.sub("", text)
+    text = _FENCE_TAG_RE.sub("", text)
     return text
 
 
@@ -122,7 +119,7 @@ class StreamingContextScrubber:
                     self._buf = buf[-held:] if held else ""
                     return "".join(out)
                 # Found close — skip span content + tag, continue
-                buf = buf[idx + len(self._CLOSE_TAG):]
+                buf = buf[idx + len(self._CLOSE_TAG) :]
                 self._in_span = False
             else:
                 idx = buf.lower().find(self._OPEN_TAG)
@@ -138,7 +135,7 @@ class StreamingContextScrubber:
                 # Emit text before the tag, enter span
                 if idx > 0:
                     out.append(buf[:idx])
-                buf = buf[idx + len(self._OPEN_TAG):]
+                buf = buf[idx + len(self._OPEN_TAG) :]
                 self._in_span = True
 
         return "".join(out)
@@ -224,7 +221,8 @@ class MemoryManager:
                     "already registered. Only one external memory provider is "
                     "allowed at a time. Configure which one via memory.provider "
                     "in config.yaml.",
-                    provider.name, existing,
+                    provider.name,
+                    existing,
                 )
                 return
             self._has_external = True
@@ -280,7 +278,8 @@ class MemoryManager:
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' system_prompt_block() failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
         return "\n\n".join(blocks)
 
@@ -301,7 +300,8 @@ class MemoryManager:
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' prefetch failed (non-fatal): %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
         return self._merge_prefetch_parts(parts)
 
@@ -333,7 +333,9 @@ class MemoryManager:
                 headers.append(line)
                 continue
 
-            if any(self._prefetch_lines_match(normalized, prior) for prior in seen_content):
+            if any(
+                self._prefetch_lines_match(normalized, prior) for prior in seen_content
+            ):
                 continue
 
             seen_content.append(normalized)
@@ -377,7 +379,11 @@ class MemoryManager:
             return False
         if left == right:
             return True
-        if len(left) >= 24 and len(right) >= 24 and SequenceMatcher(a=left, b=right).ratio() >= 0.96:
+        if (
+            len(left) >= 24
+            and len(right) >= 24
+            and SequenceMatcher(a=left, b=right).ratio() >= 0.96
+        ):
             return True
         return False
 
@@ -389,20 +395,26 @@ class MemoryManager:
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' queue_prefetch failed (non-fatal): %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
     # -- Sync ----------------------------------------------------------------
 
-    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_all(
+        self, user_content: str, assistant_content: str, *, session_id: str = ""
+    ) -> None:
         """Sync a completed turn to all providers."""
         for provider in self._providers:
             try:
-                provider.sync_turn(user_content, assistant_content, session_id=session_id)
+                provider.sync_turn(
+                    user_content, assistant_content, session_id=session_id
+                )
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' sync_turn failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
     # -- Tools ---------------------------------------------------------------
@@ -421,7 +433,8 @@ class MemoryManager:
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' get_tool_schemas() failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
         return schemas
 
@@ -433,9 +446,7 @@ class MemoryManager:
         """Check if any provider handles this tool."""
         return tool_name in self._tool_to_provider
 
-    def handle_tool_call(
-        self, tool_name: str, args: Dict[str, Any], **kwargs
-    ) -> str:
+    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         """Route a tool call to the correct provider.
 
         Returns JSON string result. Raises ValueError if no provider
@@ -449,7 +460,9 @@ class MemoryManager:
         except Exception as e:
             logger.error(
                 "Memory provider '%s' handle_tool_call(%s) failed: %s",
-                provider.name, tool_name, e,
+                provider.name,
+                tool_name,
+                e,
             )
             return tool_error(f"Memory tool '{tool_name}' failed: {e}")
 
@@ -466,7 +479,8 @@ class MemoryManager:
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_turn_start failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
@@ -477,7 +491,8 @@ class MemoryManager:
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_session_end failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
     def on_session_switch(
@@ -512,7 +527,8 @@ class MemoryManager:
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_session_switch failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
@@ -530,7 +546,8 @@ class MemoryManager:
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_pre_compress failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
         return "\n\n".join(parts)
 
@@ -549,8 +566,10 @@ class MemoryManager:
             return "keyword"
 
         accepted = [
-            p for p in params
-            if p.kind in (
+            p
+            for p in params
+            if p.kind
+            in (
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 inspect.Parameter.KEYWORD_ONLY,
@@ -581,17 +600,21 @@ class MemoryManager:
                         action, target, content, metadata=dict(metadata or {})
                     )
                 elif metadata_mode == "positional":
-                    provider.on_memory_write(action, target, content, dict(metadata or {}))
+                    provider.on_memory_write(
+                        action, target, content, dict(metadata or {})
+                    )
                 else:
                     provider.on_memory_write(action, target, content)
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_memory_write failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
-    def on_delegation(self, task: str, result: str, *,
-                      child_session_id: str = "", **kwargs) -> None:
+    def on_delegation(
+        self, task: str, result: str, *, child_session_id: str = "", **kwargs
+    ) -> None:
         """Notify all providers that a subagent completed."""
         for provider in self._providers:
             try:
@@ -601,7 +624,8 @@ class MemoryManager:
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_delegation failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
     def shutdown_all(self) -> None:
@@ -612,7 +636,8 @@ class MemoryManager:
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' shutdown failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
 
     def initialize_all(self, session_id: str, **kwargs) -> None:
@@ -624,6 +649,7 @@ class MemoryManager:
         """
         if "hermes_home" not in kwargs:
             from hermes_constants import get_hermes_home
+
             kwargs["hermes_home"] = str(get_hermes_home())
         for provider in self._providers:
             try:
@@ -631,5 +657,6 @@ class MemoryManager:
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' initialize failed: %s",
-                    provider.name, e,
+                    provider.name,
+                    e,
                 )
