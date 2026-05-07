@@ -41,7 +41,9 @@ class MemPalaceToolsMixin:
             return json.dumps(exc.to_dict())
         except Exception as exc:
             logger.error("MemPalace tool error (%s): %s", tool_name, exc)
-            return json.dumps(MemPalaceToolError(str(exc), {"tool_name": tool_name}).to_dict())
+            return json.dumps(
+                MemPalaceToolError(str(exc), {"tool_name": tool_name}).to_dict()
+            )
 
     def _dispatch(self, tool_name: str, args: dict) -> Any:
         if tool_name == "mempalace_memorize":
@@ -86,7 +88,9 @@ class MemPalaceToolsMixin:
                 "importance": importance,
             }
         except Exception as exc:
-            raise MemPalaceBackendError("Failed to store memory", {"cause": str(exc), "room": room}) from exc
+            raise MemPalaceBackendError(
+                "Failed to store memory", {"cause": str(exc), "room": room}
+            ) from exc
 
     def _do_search(self, args: dict) -> dict:
         query = str(args.get("query", "") or "").strip()
@@ -107,7 +111,9 @@ class MemPalaceToolsMixin:
             )
             return self._format_search_result(result, raw=True, limit=top_k)
         except Exception as exc:
-            raise MemPalaceBackendError("Search failed", {"cause": str(exc), "query": query, "room": room}) from exc
+            raise MemPalaceBackendError(
+                "Search failed", {"cause": str(exc), "query": query, "room": room}
+            ) from exc
 
     def _do_recall(self, args: dict) -> dict:
         room = self._resolve_room(args.get("room")) if args.get("room") else None
@@ -129,16 +135,20 @@ class MemPalaceToolsMixin:
             items = []
             for i, doc in enumerate(docs):
                 meta = metas[i] if i < len(metas) else {}
-                items.append({
-                    "id": ids[i] if i < len(ids) else "",
-                    "content": doc,
-                    "metadata": meta,
-                    "distance": 0.0,
-                })
+                items.append(
+                    {
+                        "id": ids[i] if i < len(ids) else "",
+                        "content": doc,
+                        "metadata": meta,
+                        "distance": 0.0,
+                    }
+                )
 
             return {"results": self._prepare_results(items, limit=n)}
         except Exception as exc:
-            raise MemPalaceBackendError("Recall failed", {"cause": str(exc), "room": room}) from exc
+            raise MemPalaceBackendError(
+                "Recall failed", {"cause": str(exc), "room": room}
+            ) from exc
 
     def _do_forget(self, args: dict) -> dict:
         memory_id = str(args.get("memory_id", "") or "").strip()
@@ -149,7 +159,9 @@ class MemPalaceToolsMixin:
             self._collection.delete(ids=[memory_id])
             return {"success": True, "memory_id": memory_id}
         except Exception as exc:
-            raise MemPalaceBackendError("Failed to delete memory", {"cause": str(exc), "memory_id": memory_id}) from exc
+            raise MemPalaceBackendError(
+                "Failed to delete memory", {"cause": str(exc), "memory_id": memory_id}
+            ) from exc
 
     def _do_status(self) -> dict:
         try:
@@ -162,7 +174,7 @@ class MemPalaceToolsMixin:
                 "user_id": self._user_id,
                 "platform": getattr(self, "_platform", "default"),
                 "tool_max_results": getattr(self, "_tool_max_results", None),
-                "room_strategy": getattr(self._config, 'room_strategy', None),
+                "room_strategy": getattr(self._config, "room_strategy", None),
             }
 
             if self._collection is not None:
@@ -179,9 +191,13 @@ class MemPalaceToolsMixin:
 
             return status
         except Exception as exc:
-            raise MemPalaceBackendError("Status check failed", {"cause": str(exc)}) from exc
+            raise MemPalaceBackendError(
+                "Status check failed", {"cause": str(exc)}
+            ) from exc
 
-    def _raw_search(self, query: str, n_results: int = 5, room: str | None = None) -> dict:
+    def _raw_search(
+        self, query: str, n_results: int = 5, room: str | None = None
+    ) -> dict:
         effective_room = self._resolve_room(room) if room else None
         target = min(max(n_results, 1), self._tool_max_results)
         return self._collection.query(
@@ -203,9 +219,13 @@ class MemPalaceToolsMixin:
             return conditions[0]
         return {"$and": conditions}
 
-    def _format_search_result(self, result: Any, raw: bool = False, limit: int | None = None) -> dict[str, Any] | str:
+    def _format_search_result(
+        self, result: Any, raw: bool = False, limit: int | None = None
+    ) -> dict[str, Any] | str:
         if not isinstance(result, dict):
-            prepared = self._prepare_results(result if isinstance(result, list) else [], limit=limit)
+            prepared = self._prepare_results(
+                result if isinstance(result, list) else [], limit=limit
+            )
             if raw:
                 return {"results": prepared}
             return self._render_results(prepared)
@@ -219,19 +239,23 @@ class MemPalaceToolsMixin:
         for i, doc in enumerate(docs):
             meta = metas[i] if i < len(metas) else {}
             distance = distances[i] if i < len(distances) else None
-            results_list.append({
-                "id": ids[i] if i < len(ids) else "",
-                "content": doc,
-                "metadata": meta,
-                "distance": distance,
-            })
+            results_list.append(
+                {
+                    "id": ids[i] if i < len(ids) else "",
+                    "content": doc,
+                    "metadata": meta,
+                    "distance": distance,
+                }
+            )
 
         prepared = self._prepare_results(results_list, limit=limit)
         if raw:
             return {"results": prepared}
         return self._render_results(prepared)
 
-    def _prepare_results(self, results_list: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
+    def _prepare_results(
+        self, results_list: list[dict[str, Any]], limit: int | None = None
+    ) -> list[dict[str, Any]]:
         """Deduplicate near-identical hits and suppress low-signal conversation noise."""
         if not results_list:
             return []
@@ -253,14 +277,19 @@ class MemPalaceToolsMixin:
             coarse_key = normalized[:180]
             if coarse_key in seen_keys:
                 continue
-            if any(self._looks_like_duplicate(normalized, prior) for prior in normalized_seen):
+            if any(
+                self._looks_like_duplicate(normalized, prior)
+                for prior in normalized_seen
+            ):
                 continue
 
             seen_keys.add(coarse_key)
             normalized_seen.append(normalized)
             unique.append(item)
 
-        preferred = [item for item in unique if not self._is_low_signal_conversation(item)]
+        preferred = [
+            item for item in unique if not self._is_low_signal_conversation(item)
+        ]
         selected = preferred if preferred else unique[:1]
         if limit is not None:
             return selected[: max(limit, 0)]
@@ -289,7 +318,9 @@ class MemPalaceToolsMixin:
         expanded = max(requested, min(self._tool_max_results, requested * 3))
         return min(expanded, self._tool_max_results)
 
-    def _result_rank_key(self, item: dict[str, Any]) -> tuple[int, int, float, float, str]:
+    def _result_rank_key(
+        self, item: dict[str, Any]
+    ) -> tuple[int, int, float, float, str]:
         meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         message_kind = str(meta.get("message_kind", "") or "")
         is_low_signal = self._is_low_signal_conversation(item)
@@ -297,9 +328,17 @@ class MemPalaceToolsMixin:
         low_signal_bucket = 1 if is_low_signal else 0
         importance = float(meta.get("importance", 0.0) or 0.0)
         distance = item.get("distance")
-        distance_value = float(distance) if isinstance(distance, (int, float)) else 999999.0
+        distance_value = (
+            float(distance) if isinstance(distance, (int, float)) else 999999.0
+        )
         created_at = str(meta.get("created_at", "") or "")
-        return (priority_bucket, low_signal_bucket, -importance, distance_value, created_at)
+        return (
+            priority_bucket,
+            low_signal_bucket,
+            -importance,
+            distance_value,
+            created_at,
+        )
 
     def _is_low_signal_conversation(self, item: dict[str, Any]) -> bool:
         meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
@@ -311,7 +350,12 @@ class MemPalaceToolsMixin:
             return False
         if float(meta.get("importance", 0.0) or 0.0) >= 0.85:
             return False
-        if str(meta.get("source", "") or "") in {"memory", "compression", "session_end", "tool"}:
+        if str(meta.get("source", "") or "") in {
+            "memory",
+            "compression",
+            "session_end",
+            "tool",
+        }:
             return False
         return True
 

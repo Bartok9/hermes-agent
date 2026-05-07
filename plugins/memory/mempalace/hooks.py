@@ -71,7 +71,8 @@ class MemPalaceHooksMixin:
                     room=room,
                     content=content,
                     source_file=f"builtin_{target}_{action}",
-                    chunk_index=int(datetime.now(timezone.utc).timestamp() * 1000) % 1000000,
+                    chunk_index=int(datetime.now(timezone.utc).timestamp() * 1000)
+                    % 1000000,
                     source=SOURCE_MEMORY,
                     message_kind=MESSAGE_KIND_BUILTIN_MEMORY_WRITE,
                 )
@@ -151,7 +152,9 @@ class MemPalaceHooksMixin:
         except Exception as exc:
             logger.warning("MemPalace on_session_end failed: %s", exc)
 
-    def _extract_key_content(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _extract_key_content(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Extract meaningful content from message list for compression/session end."""
         extracted = []
         skip_patterns = (

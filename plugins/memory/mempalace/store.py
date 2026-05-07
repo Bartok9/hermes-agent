@@ -17,15 +17,17 @@ def make_drawer_id(
     content: str,
     session_id: str = "",
 ) -> str:
-    digest_source = "|".join([
-        wing,
-        room,
-        source_file,
-        str(chunk_index),
-        str(session_id or ""),
-        content,
-    ])
-    digest = sha256(digest_source.encode('utf-8')).hexdigest()[:24]
+    digest_source = "|".join(
+        [
+            wing,
+            room,
+            source_file,
+            str(chunk_index),
+            str(session_id or ""),
+            content,
+        ]
+    )
+    digest = sha256(digest_source.encode("utf-8")).hexdigest()[:24]
     return f"drawer_{wing}_{room}_{digest}"
 
 
@@ -61,7 +63,7 @@ def build_memory_item(
         source_file=source_file,
         chunk_index=chunk_index,
         content=content,
-        session_id=str(runtime_ctx.get('session_id') or ''),
+        session_id=str(runtime_ctx.get("session_id") or ""),
     )
     return {
         "id": item_id,

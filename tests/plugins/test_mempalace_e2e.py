@@ -114,9 +114,15 @@ def test_memorize_search_recall_forget_round_trip(provider):
         {"query": "publishable plugin design", "room": "prefs-room", "top_k": 5},
     )
     assert "results" in search
-    assert any("publishable plugin design" in item["content"] for item in search["results"])
+    assert any(
+        "publishable plugin design" in item["content"] for item in search["results"]
+    )
 
-    target = next(item for item in search["results"] if "publishable plugin design" in item["content"])
+    target = next(
+        item
+        for item in search["results"]
+        if "publishable plugin design" in item["content"]
+    )
     assert target["metadata"]["room"] == "prefs-room"
     assert target["metadata"]["wing"] == provider._wing
     assert target["metadata"]["source"] == "tool"
@@ -128,14 +134,18 @@ def test_memorize_search_recall_forget_round_trip(provider):
     assert target["metadata"]["agent_id"] == "hermes"
     assert "created_at" in target["metadata"]
 
-    recall = _tool(provider, "mempalace_recall", {"room": "prefs-room", "n_results": 10})
+    recall = _tool(
+        provider, "mempalace_recall", {"room": "prefs-room", "n_results": 10}
+    )
     assert "results" in recall
     assert any(item["id"] == target["id"] for item in recall["results"])
 
     forget = _tool(provider, "mempalace_forget", {"memory_id": target["id"]})
     assert forget["success"] is True
 
-    recall_after = _tool(provider, "mempalace_recall", {"room": "prefs-room", "n_results": 10})
+    recall_after = _tool(
+        provider, "mempalace_recall", {"room": "prefs-room", "n_results": 10}
+    )
     assert all(item["id"] != target["id"] for item in recall_after["results"])
 
 
@@ -154,11 +164,15 @@ def test_sync_turn_and_prefetch_share_same_collection(provider):
         time.sleep(0.05)
     assert provider._collection.count() >= before + 2
 
-    direct = provider._raw_search("Browserbase anti-bot verification", n_results=5, room="telegram-thread-42")
+    direct = provider._raw_search(
+        "Browserbase anti-bot verification", n_results=5, room="telegram-thread-42"
+    )
     formatted = provider._format_search_result(direct, raw=True)
     assert formatted["results"]
     assert any("Browserbase" in item["content"] for item in formatted["results"])
-    matched = next(item for item in formatted["results"] if "Browserbase" in item["content"])
+    matched = next(
+        item for item in formatted["results"] if "Browserbase" in item["content"]
+    )
     assert matched["metadata"]["room"] == "telegram-thread-42"
     assert matched["metadata"]["source"] == "sync_turn"
     assert matched["metadata"]["message_kind"] == "user_message"
@@ -178,11 +192,27 @@ def test_where_filter_uses_and_for_wing_plus_room(provider):
 
 def test_search_caps_top_k_by_tool_max_results(provider):
     provider._tool_max_results = 2
-    _tool(provider, "mempalace_memorize", {"content": "cap result one", "room": "cap-room"})
-    _tool(provider, "mempalace_memorize", {"content": "cap result two", "room": "cap-room"})
-    _tool(provider, "mempalace_memorize", {"content": "cap result three", "room": "cap-room"})
+    _tool(
+        provider,
+        "mempalace_memorize",
+        {"content": "cap result one", "room": "cap-room"},
+    )
+    _tool(
+        provider,
+        "mempalace_memorize",
+        {"content": "cap result two", "room": "cap-room"},
+    )
+    _tool(
+        provider,
+        "mempalace_memorize",
+        {"content": "cap result three", "room": "cap-room"},
+    )
 
-    search = _tool(provider, "mempalace_search", {"query": "cap result", "room": "cap-room", "top_k": 10})
+    search = _tool(
+        provider,
+        "mempalace_search",
+        {"query": "cap result", "room": "cap-room", "top_k": 10},
+    )
     assert len(search["results"]) <= 2
 
 
@@ -194,13 +224,27 @@ def test_handle_tool_call_returns_structured_error_payload(provider):
 
 
 def test_search_room_filter_does_not_leak_other_rooms(provider):
-    _tool(provider, "mempalace_memorize", {"content": "alpha room memory", "room": "room-a"})
-    _tool(provider, "mempalace_memorize", {"content": "beta room memory", "room": "room-b"})
+    _tool(
+        provider,
+        "mempalace_memorize",
+        {"content": "alpha room memory", "room": "room-a"},
+    )
+    _tool(
+        provider,
+        "mempalace_memorize",
+        {"content": "beta room memory", "room": "room-b"},
+    )
 
-    search_a = _tool(provider, "mempalace_search", {"query": "room memory", "room": "room-a", "top_k": 10})
+    search_a = _tool(
+        provider,
+        "mempalace_search",
+        {"query": "room memory", "room": "room-a", "top_k": 10},
+    )
     assert search_a["results"]
     assert all(item["metadata"]["room"] == "room-a" for item in search_a["results"])
-    assert all("beta room memory" not in item["content"] for item in search_a["results"])
+    assert all(
+        "beta room memory" not in item["content"] for item in search_a["results"]
+    )
 
 
 def test_search_deduplicates_near_identical_results(provider):
@@ -212,9 +256,17 @@ def test_search_deduplicates_near_identical_results(provider):
         repeated + "   ",
     ]
     for item in variants:
-        _tool(provider, "mempalace_memorize", {"content": item, "room": room, "memory_type": "instruction"})
+        _tool(
+            provider,
+            "mempalace_memorize",
+            {"content": item, "room": room, "memory_type": "instruction"},
+        )
 
-    search = _tool(provider, "mempalace_search", {"query": "user.md memory.md 记忆方案", "room": room, "top_k": 10})
+    search = _tool(
+        provider,
+        "mempalace_search",
+        {"query": "user.md memory.md 记忆方案", "room": room, "top_k": 10},
+    )
     assert len(search["results"]) == 1
     assert repeated in search["results"][0]["content"]
 
@@ -227,16 +279,46 @@ def test_recall_deduplicates_internal_duplicates_and_backfills_unique_results(pr
         "这样子的话注入上下文时不会有重复吗   ",
     ]
     for item in duplicates:
-        _tool(provider, "mempalace_memorize", {"content": item, "room": room, "memory_type": "instruction"})
+        _tool(
+            provider,
+            "mempalace_memorize",
+            {"content": item, "room": room, "memory_type": "instruction"},
+        )
 
-    _tool(provider, "mempalace_memorize", {"content": "长期事实：系统现在会先做跨 provider 去重。", "room": room, "memory_type": "factual", "importance": 0.95})
-    _tool(provider, "mempalace_memorize", {"content": "待办：还要继续优化 MemPalace recall 内部去重。", "room": room, "memory_type": "instruction", "importance": 0.9})
+    _tool(
+        provider,
+        "mempalace_memorize",
+        {
+            "content": "长期事实：系统现在会先做跨 provider 去重。",
+            "room": room,
+            "memory_type": "factual",
+            "importance": 0.95,
+        },
+    )
+    _tool(
+        provider,
+        "mempalace_memorize",
+        {
+            "content": "待办：还要继续优化 MemPalace recall 内部去重。",
+            "room": room,
+            "memory_type": "instruction",
+            "importance": 0.9,
+        },
+    )
 
     recall = _tool(provider, "mempalace_recall", {"room": room, "n_results": 3})
     assert len(recall["results"]) == 3
-    assert sum("这样子的话注入上下文时不会有重复吗" in item["content"] for item in recall["results"]) == 1
+    assert (
+        sum(
+            "这样子的话注入上下文时不会有重复吗" in item["content"]
+            for item in recall["results"]
+        )
+        == 1
+    )
     assert any("跨 provider 去重" in item["content"] for item in recall["results"])
-    assert any("MemPalace recall 内部去重" in item["content"] for item in recall["results"])
+    assert any(
+        "MemPalace recall 内部去重" in item["content"] for item in recall["results"]
+    )
 
 
 def test_prefetch_filters_low_signal_conversation_when_memory_exists(provider):
@@ -256,21 +338,33 @@ def test_prefetch_filters_low_signal_conversation_when_memory_exists(provider):
         },
     )
 
-    provider.queue_prefetch("记忆方案还在用吗 memory.md user.md", session_id="thread-noise")
+    provider.queue_prefetch(
+        "记忆方案还在用吗 memory.md user.md", session_id="thread-noise"
+    )
     _wait_for_prefetch(provider)
-    prefetched = provider.prefetch("记忆方案还在用吗 memory.md user.md", session_id="thread-noise")
+    prefetched = provider.prefetch(
+        "记忆方案还在用吗 memory.md user.md", session_id="thread-noise"
+    )
     assert "[MemPalace Memory]" in prefetched
     assert "长期事实" in prefetched
     assert "我之前准备为你重写一个 memorypalace plugin" not in prefetched
 
 
 def test_on_memory_write_mirrors_builtin_memory(provider):
-    provider.on_memory_write("add", "memory", "Builtin memory mirror marker for hook verification.")
+    provider.on_memory_write(
+        "add", "memory", "Builtin memory mirror marker for hook verification."
+    )
 
-    direct = provider._raw_search("Builtin memory mirror marker", n_results=5, room="memory")
+    direct = provider._raw_search(
+        "Builtin memory mirror marker", n_results=5, room="memory"
+    )
     formatted = provider._format_search_result(direct, raw=True)
     assert formatted["results"]
-    matched = next(item for item in formatted["results"] if "Builtin memory mirror marker" in item["content"])
+    matched = next(
+        item
+        for item in formatted["results"]
+        if "Builtin memory mirror marker" in item["content"]
+    )
     assert matched["metadata"]["room"] == "memory"
     assert matched["metadata"]["source"] == "memory"
     assert matched["metadata"]["message_kind"] == "builtin_memory_write"
@@ -278,12 +372,17 @@ def test_on_memory_write_mirrors_builtin_memory(provider):
     assert matched["metadata"]["session_id"] == "sess-e2e"
 
 
-
 def test_on_pre_compress_persists_key_facts(provider):
     messages = [
         {"role": "system", "content": "system prompt should be skipped"},
-        {"role": "user", "content": "Compression hook marker alpha: we chose the modular provider layout for maintainability."},
-        {"role": "assistant", "content": "Compression hook marker beta: preserve this architectural rationale before compression."},
+        {
+            "role": "user",
+            "content": "Compression hook marker alpha: we chose the modular provider layout for maintainability.",
+        },
+        {
+            "role": "assistant",
+            "content": "Compression hook marker beta: preserve this architectural rationale before compression.",
+        },
     ]
 
     summary = provider.on_pre_compress(messages)
@@ -296,9 +395,22 @@ def test_on_pre_compress_persists_key_facts(provider):
         room="session-sess-e2e",
     )
     formatted = provider._format_search_result(direct, raw=True)
-    assert len([item for item in formatted["results"] if "Compression hook marker" in item["content"]]) >= 2
+    assert (
+        len(
+            [
+                item
+                for item in formatted["results"]
+                if "Compression hook marker" in item["content"]
+            ]
+        )
+        >= 2
+    )
 
-    matched = next(item for item in formatted["results"] if "Compression hook marker alpha" in item["content"])
+    matched = next(
+        item
+        for item in formatted["results"]
+        if "Compression hook marker alpha" in item["content"]
+    )
     assert matched["metadata"]["room"] == "session-sess-e2e"
     assert matched["metadata"]["source"] == "compression"
     assert matched["metadata"]["message_kind"] == "compressed_context"
@@ -306,15 +418,25 @@ def test_on_pre_compress_persists_key_facts(provider):
     assert matched["metadata"]["session_id"] == "sess-e2e"
 
 
-
 def test_on_session_end_persists_summary_room(provider):
     messages = [
         {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "We chose scenario C because it is more publishable and general."},
-        {"role": "assistant", "content": "Understood. We will validate the publishable path end-to-end."},
+        {
+            "role": "user",
+            "content": "We chose scenario C because it is more publishable and general.",
+        },
+        {
+            "role": "assistant",
+            "content": "Understood. We will validate the publishable path end-to-end.",
+        },
     ]
 
     provider.on_session_end(messages)
-    recall = _tool(provider, "mempalace_recall", {"room": "session_summaries", "n_results": 10})
+    recall = _tool(
+        provider, "mempalace_recall", {"room": "session_summaries", "n_results": 10}
+    )
     assert recall["results"]
-    assert any("scenario C" in item["content"] or "publishable path" in item["content"] for item in recall["results"])
+    assert any(
+        "scenario C" in item["content"] or "publishable path" in item["content"]
+        for item in recall["results"]
+    )

@@ -107,7 +107,14 @@ class TestConfigParsing:
 
     def test_invalid_values_fall_back_to_defaults(self, tmp_path):
         cfg = load_mempalace_config(
-            {"mempalace": {"n_results": 0, "tool_max_results": -1, "enable_kg": "not-bool", "room_strategy": "nope"}},
+            {
+                "mempalace": {
+                    "n_results": 0,
+                    "tool_max_results": -1,
+                    "enable_kg": "not-bool",
+                    "room_strategy": "nope",
+                }
+            },
             hermes_home=str(tmp_path / ".hermes"),
         )
 
@@ -133,7 +140,12 @@ class TestConfigParsing:
 
     def test_collection_name_and_fixed_room_are_sanitized(self, tmp_path):
         cfg = load_mempalace_config(
-            {"mempalace": {"collection_name": "  Custom Room/Name  ", "fixed_room": " My Room #1 "}},
+            {
+                "mempalace": {
+                    "collection_name": "  Custom Room/Name  ",
+                    "fixed_room": " My Room #1 ",
+                }
+            },
             hermes_home=str(tmp_path / ".hermes"),
         )
         assert cfg.collection_name == "custom-room-name"
@@ -147,7 +159,10 @@ class TestConfigParsing:
 
 class TestCollections:
     def test_slugify_identifier_normalizes_text(self):
-        assert slugify_identifier(" Jessica / Telegram Topic #1 ") == "jessica-telegram-topic-1"
+        assert (
+            slugify_identifier(" Jessica / Telegram Topic #1 ")
+            == "jessica-telegram-topic-1"
+        )
 
     def test_slugify_identifier_truncates_and_falls_back_when_needed(self):
         assert slugify_identifier("!!!") == "default"
@@ -160,12 +175,16 @@ class TestCollections:
 
     def test_resolve_collection_name_renders_template(self):
         cfg = MemPalaceConfig(collection_template="hermes-{platform}-{user_id}")
-        name = resolve_collection_name(cfg, {"platform": "telegram", "user_id": "Jessica 123"})
+        name = resolve_collection_name(
+            cfg, {"platform": "telegram", "user_id": "Jessica 123"}
+        )
         assert name == "hermes-telegram-jessica-123"
 
     def test_resolve_collection_name_uses_agent_and_session_fields(self):
         cfg = MemPalaceConfig(collection_template="mem-{agent_id}-{session_id}")
-        name = resolve_collection_name(cfg, {"agent_id": "Hermes Bot", "session_id": "Thread 42"})
+        name = resolve_collection_name(
+            cfg, {"agent_id": "Hermes Bot", "session_id": "Thread 42"}
+        )
         assert name == "mem-hermes-bot-thread-42"
 
     def test_resolve_collection_name_falls_back_without_user_id(self):
@@ -175,7 +194,9 @@ class TestCollections:
 
     def test_resolve_room_uses_explicit_room_first(self):
         cfg = MemPalaceConfig(room_strategy="session")
-        room = resolve_room(cfg, {"session_id": "s1"}, explicit_room="Project X / Notes")
+        room = resolve_room(
+            cfg, {"session_id": "s1"}, explicit_room="Project X / Notes"
+        )
         assert room == "project-x-notes"
 
     @pytest.mark.parametrize(
@@ -183,8 +204,16 @@ class TestCollections:
         [
             ("fixed", {}, "memory"),
             ("session", {"session_id": "sess-9"}, "sess-9"),
-            ("platform_session", {"platform": "telegram", "session_id": "sess-9"}, "telegram-sess-9"),
-            ("user_platform", {"user_id": "jessica", "platform": "telegram"}, "jessica-telegram"),
+            (
+                "platform_session",
+                {"platform": "telegram", "session_id": "sess-9"},
+                "telegram-sess-9",
+            ),
+            (
+                "user_platform",
+                {"user_id": "jessica", "platform": "telegram"},
+                "jessica-telegram",
+            ),
         ],
     )
     def test_resolve_room_strategies(self, strategy, runtime_ctx, expected):
@@ -195,7 +224,12 @@ class TestCollections:
 class TestMetadata:
     def test_build_metadata_contains_required_fields(self):
         data = build_metadata(
-            {"session_id": "sess-1", "platform": "telegram", "user_id": "u1", "agent_id": "hermes"},
+            {
+                "session_id": "sess-1",
+                "platform": "telegram",
+                "user_id": "u1",
+                "agent_id": "hermes",
+            },
             room="project-x",
             source="tool",
             message_kind="explicit_memory",
@@ -235,7 +269,12 @@ class TestMetadata:
 
 class TestStore:
     def test_make_drawer_id_includes_session_and_content_signal(self):
-        base = dict(wing="conversations", room="telegram-s1", source_file="conversation", chunk_index=0)
+        base = dict(
+            wing="conversations",
+            room="telegram-s1",
+            source_file="conversation",
+            chunk_index=0,
+        )
         id1 = make_drawer_id(content="alpha", session_id="s1", **base)
         id2 = make_drawer_id(content="beta", session_id="s1", **base)
         id3 = make_drawer_id(content="alpha", session_id="s2", **base)
@@ -245,7 +284,13 @@ class TestStore:
 
 class TestPluginManifest:
     def test_plugin_yaml_defaults_match_runtime_config(self):
-        manifest_path = Path(__file__).resolve().parents[2] / "plugins" / "memory" / "mempalace" / "plugin.yaml"
+        manifest_path = (
+            Path(__file__).resolve().parents[2]
+            / "plugins"
+            / "memory"
+            / "mempalace"
+            / "plugin.yaml"
+        )
         manifest = yaml.safe_load(manifest_path.read_text())
         defaults = {item["key"]: item.get("default") for item in manifest["config"]}
 

@@ -12,7 +12,14 @@ MEMORIZE_SCHEMA = {
             },
             "memory_type": {
                 "type": "string",
-                "enum": ["factual", "preference", "goal", "instruction", "event", "opinion"],
+                "enum": [
+                    "factual",
+                    "preference",
+                    "goal",
+                    "instruction",
+                    "event",
+                    "opinion",
+                ],
                 "description": "Category of memory (default: factual).",
             },
             "importance": {

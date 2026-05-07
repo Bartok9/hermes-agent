@@ -24,7 +24,9 @@ def _ctx_value(runtime_ctx: dict[str, Any], key: str, default: str = "default") 
     return slugify_identifier(runtime_ctx.get(key), default=default)
 
 
-def resolve_collection_name(config: MemPalaceConfig, runtime_ctx: dict[str, Any]) -> str:
+def resolve_collection_name(
+    config: MemPalaceConfig, runtime_ctx: dict[str, Any]
+) -> str:
     if config.collection_name:
         explicit = slugify_identifier(config.collection_name, default="mempalace")
         return explicit or "mempalace"
@@ -55,7 +57,11 @@ def resolve_room(
     if strategy == "fixed":
         return slugify_identifier(config.fixed_room, default="memory")
     if strategy == "platform_session":
-        return slugify_identifier(f"{runtime_ctx.get('platform', 'default')}-{runtime_ctx.get('session_id', 'default')}")
+        return slugify_identifier(
+            f"{runtime_ctx.get('platform', 'default')}-{runtime_ctx.get('session_id', 'default')}"
+        )
     if strategy == "user_platform":
-        return slugify_identifier(f"{runtime_ctx.get('user_id', 'default')}-{runtime_ctx.get('platform', 'default')}")
+        return slugify_identifier(
+            f"{runtime_ctx.get('user_id', 'default')}-{runtime_ctx.get('platform', 'default')}"
+        )
     return slugify_identifier(runtime_ctx.get("session_id"), default="default")

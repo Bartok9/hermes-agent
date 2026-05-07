@@ -69,20 +69,24 @@ def _sanitize_label(value: object, default: str, *, max_length: int) -> str:
         if ch.isascii() and ch.isalnum():
             cleaned.append(ch)
             last_dash = False
-        elif ch in {'-', '_', ' ', '/', ':'}:
+        elif ch in {"-", "_", " ", "/", ":"}:
             if not last_dash:
-                cleaned.append('-')
+                cleaned.append("-")
                 last_dash = True
-    result = ''.join(cleaned).strip('-')
+    result = "".join(cleaned).strip("-")
     if not result:
         result = default
-    return result[:max_length].strip('-') or default
+    return result[:max_length].strip("-") or default
 
 
 def _normalize_template(value: object) -> str:
-    template = str(value or DEFAULT_COLLECTION_TEMPLATE).strip() or DEFAULT_COLLECTION_TEMPLATE
+    template = (
+        str(value or DEFAULT_COLLECTION_TEMPLATE).strip() or DEFAULT_COLLECTION_TEMPLATE
+    )
     formatter = Formatter()
-    fields = {field_name for _, field_name, _, _ in formatter.parse(template) if field_name}
+    fields = {
+        field_name for _, field_name, _, _ in formatter.parse(template) if field_name
+    }
     if not fields:
         return DEFAULT_COLLECTION_TEMPLATE
     if any(field not in VALID_TEMPLATE_FIELDS for field in fields):
@@ -90,7 +94,9 @@ def _normalize_template(value: object) -> str:
     return template
 
 
-def load_mempalace_config(full_config: object, hermes_home: str | None = None) -> MemPalaceConfig:
+def load_mempalace_config(
+    full_config: object, hermes_home: str | None = None
+) -> MemPalaceConfig:
     raw = _plugin_section(full_config)
 
     palace_path = str(raw.get("palace_path") or "").strip()
@@ -103,20 +109,29 @@ def load_mempalace_config(full_config: object, hermes_home: str | None = None) -
     palace_path = os.path.abspath(palace_path)
 
     wing = str(raw.get("wing") or DEFAULT_WING).strip() or DEFAULT_WING
-    room_strategy = str(raw.get("room_strategy") or DEFAULT_ROOM_STRATEGY).strip() or DEFAULT_ROOM_STRATEGY
+    room_strategy = (
+        str(raw.get("room_strategy") or DEFAULT_ROOM_STRATEGY).strip()
+        or DEFAULT_ROOM_STRATEGY
+    )
     if room_strategy not in VALID_ROOM_STRATEGIES:
         room_strategy = DEFAULT_ROOM_STRATEGY
 
     n_results = _coerce_positive_int(raw.get("n_results"), DEFAULT_N_RESULTS)
-    tool_max_results = _coerce_positive_int(raw.get("tool_max_results"), DEFAULT_TOOL_MAX_RESULTS)
+    tool_max_results = _coerce_positive_int(
+        raw.get("tool_max_results"), DEFAULT_TOOL_MAX_RESULTS
+    )
     if tool_max_results < n_results:
         tool_max_results = n_results
 
-    collection_name = _sanitize_label(raw.get("collection_name"), "", max_length=MAX_COLLECTION_NAME_LENGTH)
+    collection_name = _sanitize_label(
+        raw.get("collection_name"), "", max_length=MAX_COLLECTION_NAME_LENGTH
+    )
     if collection_name == "":
         collection_name = ""
     collection_template = _normalize_template(raw.get("collection_template"))
-    fixed_room = _sanitize_label(raw.get("fixed_room"), DEFAULT_FIXED_ROOM, max_length=MAX_ROOM_NAME_LENGTH)
+    fixed_room = _sanitize_label(
+        raw.get("fixed_room"), DEFAULT_FIXED_ROOM, max_length=MAX_ROOM_NAME_LENGTH
+    )
 
     return MemPalaceConfig(
         palace_path=palace_path,

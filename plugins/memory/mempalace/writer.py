@@ -20,7 +20,9 @@ class WriteQueue:
         self._collection = collection
         self._agent_id = agent_id
         self._q: queue.Queue = queue.Queue()
-        self._thread = thread_factory(target=self._loop, name="mempalace-writer", daemon=True)
+        self._thread = thread_factory(
+            target=self._loop, name="mempalace-writer", daemon=True
+        )
         self._running = True
         self._thread.start()
 
