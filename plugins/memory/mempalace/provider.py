@@ -8,8 +8,18 @@ import threading
 from typing import Any
 
 from agent.memory_provider import MemoryProvider
-from mempalace.knowledge_graph import KnowledgeGraph
-from mempalace.palace import get_collection
+
+# MemPalace imports are optional — guard at module level to allow
+# graceful degradation when mempalace is not installed.
+try:
+    from mempalace.knowledge_graph import KnowledgeGraph
+    from mempalace.palace import get_collection
+
+    _MEMPALACE_AVAILABLE = True
+except ImportError:
+    KnowledgeGraph = None  # type: ignore[assignment,misc]
+    get_collection = None  # type: ignore[assignment]
+    _MEMPALACE_AVAILABLE = False
 
 from .collections import resolve_collection_name, resolve_room
 from .config import (
@@ -65,6 +75,7 @@ class MemPalaceMemoryProvider(MemPalaceHooksMixin, MemPalaceToolsMixin, MemoryPr
     def is_available(self) -> bool:
         try:
             import mempalace  # noqa: F401
+
             return True
         except ImportError:
             return False
@@ -128,8 +139,16 @@ class MemPalaceMemoryProvider(MemPalaceHooksMixin, MemPalaceToolsMixin, MemoryPr
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        if not _MEMPALACE_AVAILABLE:
+            raise RuntimeError(
+                "mempalace package is not installed. "
+                "Install it with: pip install mempalace"
+            )
         self._session_id = session_id
-        cfg = load_mempalace_config(kwargs.get("config", {}), hermes_home=str(kwargs.get("hermes_home", "") or ""))
+        cfg = load_mempalace_config(
+            kwargs.get("config", {}),
+            hermes_home=str(kwargs.get("hermes_home", "") or ""),
+        )
         self._config = cfg
         self._wing = cfg.wing
         self._n_results = cfg.n_results
@@ -153,16 +172,22 @@ class MemPalaceMemoryProvider(MemPalaceHooksMixin, MemPalaceToolsMixin, MemoryPr
             palace_path=self._palace_path,
             collection_name=self._collection_name,
         )
-        logger.info("MemPalace collection '%s' initialized at %s", self._collection_name, self._palace_path)
+        logger.info(
+            "MemPalace collection '%s' initialized at %s",
+            self._collection_name,
+            self._palace_path,
+        )
 
         if self._kg_enabled:
-            kg_path = os.path.join(self._palace_path, 'knowledge_graph.db')
+            kg_path = os.path.join(self._palace_path, "knowledge_graph.db")
             self._kg = KnowledgeGraph(db_path=kg_path)
             logger.info("MemPalace knowledge graph initialized at %s", kg_path)
         else:
             self._kg = None
 
-        self._queue = WriteQueue(self._collection, self._agent_id, thread_factory=self._thread_factory)
+        self._queue = WriteQueue(
+            self._collection, self._agent_id, thread_factory=self._thread_factory
+        )
         logger.info("MemPalace initialized successfully for session %s", session_id)
 
     def system_prompt_block(self) -> str:
@@ -186,7 +211,9 @@ class MemPalaceMemoryProvider(MemPalaceHooksMixin, MemPalaceToolsMixin, MemoryPr
                 pass
         logger.info("MemPalace shutdown complete")
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(
+        self, user_content: str, assistant_content: str, *, session_id: str = ""
+    ) -> None:
         if not self._queue:
             return
 
@@ -195,26 +222,30 @@ class MemPalaceMemoryProvider(MemPalaceHooksMixin, MemPalaceToolsMixin, MemoryPr
         items = []
 
         if user_content and user_content.strip():
-            items.append(self._queue_item(
-                room=room,
-                content=user_content.strip(),
-                source_file="conversation",
-                chunk_index=0,
-                source=SOURCE_SYNC_TURN,
-                message_kind=MESSAGE_KIND_USER_MESSAGE,
-                session_id=effective_session,
-            ))
+            items.append(
+                self._queue_item(
+                    room=room,
+                    content=user_content.strip(),
+                    source_file="conversation",
+                    chunk_index=0,
+                    source=SOURCE_SYNC_TURN,
+                    message_kind=MESSAGE_KIND_USER_MESSAGE,
+                    session_id=effective_session,
+                )
+            )
 
         if assistant_content and assistant_content.strip():
-            items.append(self._queue_item(
-                room=room,
-                content=assistant_content.strip(),
-                source_file="conversation",
-                chunk_index=1,
-                source=SOURCE_SYNC_TURN,
-                message_kind=MESSAGE_KIND_ASSISTANT_MESSAGE,
-                session_id=effective_session,
-            ))
+            items.append(
+                self._queue_item(
+                    room=room,
+                    content=assistant_content.strip(),
+                    source_file="conversation",
+                    chunk_index=1,
+                    source=SOURCE_SYNC_TURN,
+                    message_kind=MESSAGE_KIND_ASSISTANT_MESSAGE,
+                    session_id=effective_session,
+                )
+            )
 
         if items:
             self._queue.enqueue(items)
@@ -225,7 +256,9 @@ class MemPalaceMemoryProvider(MemPalaceHooksMixin, MemPalaceToolsMixin, MemoryPr
             runtime_ctx["session_id"] = session_id
         return runtime_ctx
 
-    def _resolve_room(self, explicit_room: str | None = None, *, session_id: str | None = None) -> str:
+    def _resolve_room(
+        self, explicit_room: str | None = None, *, session_id: str | None = None
+    ) -> str:
         runtime_ctx = self._runtime_context(session_id=session_id)
         return resolve_room(self._config, runtime_ctx, explicit_room=explicit_room)
 
