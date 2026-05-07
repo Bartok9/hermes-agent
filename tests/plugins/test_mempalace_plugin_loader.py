@@ -8,6 +8,19 @@ from unittest.mock import MagicMock
 
 import pytest
 
+_mempalace_installed = False
+try:
+    import mempalace  # noqa: F401
+
+    _mempalace_installed = True
+except ImportError:
+    pass
+
+_requires_mempalace = pytest.mark.skipif(
+    not _mempalace_installed,
+    reason="mempalace package not installed (pip install mempalace)",
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "mempalace"
 INIT_FILE = PLUGIN_DIR / "__init__.py"
@@ -59,6 +72,7 @@ def test_register_works_when_loaded_like_hermes(plugin_module):
     ctx.register_memory_provider.assert_called_once()
 
 
+@_requires_mempalace
 def test_initialize_uses_current_hermes_config_shape(plugin_module, tmp_path):
     provider = plugin_module.MemPalaceMemoryProvider()
     hermes_home = tmp_path / ".hermes"
@@ -106,6 +120,7 @@ def test_initialize_uses_current_hermes_config_shape(plugin_module, tmp_path):
         provider.shutdown()
 
 
+@_requires_mempalace
 def test_initialize_respects_disable_kg(plugin_module, tmp_path):
     provider = plugin_module.MemPalaceMemoryProvider()
     provider.initialize(
