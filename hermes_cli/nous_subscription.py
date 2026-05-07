@@ -1,6 +1,7 @@
 """Helpers for Nous subscription managed-tool capabilities."""
 
 from __future__ import annotations
+import os
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -340,7 +341,7 @@ def get_nous_subscription_features(
             or (web_search_backend == "tavily" and direct_tavily)
         )
     )
-    direct_brave = _has_env("BRAVE_API_KEY")
+    direct_brave = bool(os.environ.get("BRAVE_API_KEY", "").strip())
     web_available = bool(
         managed_web_available or direct_exa or direct_firecrawl or direct_parallel or direct_tavily or direct_searxng or direct_brave
     )
