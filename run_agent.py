@@ -3094,7 +3094,9 @@ class AIAgent:
             self._is_direct_openai_url()
             or self._is_azure_openai_url()
             or self._is_github_copilot_url()
-            or model_forces_max_completion_tokens(self.model)
+            or model_forces_max_completion_tokens(
+                self.model if isinstance(self.model, str) else ""
+            )
         ):
             return {"max_completion_tokens": value}
         return {"max_tokens": value}
