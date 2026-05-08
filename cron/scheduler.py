@@ -652,7 +652,7 @@ def _get_script_timeout() -> int:
     return _DEFAULT_SCRIPT_TIMEOUT
 
 
-def _run_job_script(script_path: str) -> tuple[bool, str]:
+def _run_job_script(script_path: str, cwd: Optional[str] = None) -> tuple[bool, str]:
     """Execute a cron job's data-collection script and capture its output.
 
     Scripts must reside within HERMES_HOME/scripts/.  Both relative and
@@ -674,6 +674,8 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         script_path: Path to the script.  Relative paths are resolved
             against HERMES_HOME/scripts/.  Absolute and ~-prefixed paths
             are also validated to ensure they stay within the scripts dir.
+        cwd: Optional working directory for the subprocess.  Defaults to
+            the script's parent directory for backward compatibility.
 
     Returns:
         (success, output) — on failure *output* contains the error message so the
@@ -706,6 +708,12 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
 
+    run_cwd = path.parent
+    if cwd:
+        run_cwd = Path(cwd).expanduser()
+        if not run_cwd.is_dir():
+            return False, f"Workdir not found: {run_cwd}"
+
     script_timeout = _get_script_timeout()
 
     # Pick an interpreter by extension.  Bash for .sh/.bash, Python for
@@ -724,7 +732,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=script_timeout,
-            cwd=str(path.parent),
+            cwd=str(run_cwd),
         )
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
@@ -779,6 +787,18 @@ def _parse_wake_gate(script_output: str) -> bool:
     return gate.get("wakeAgent", True) is not False
 
 
+def _resolve_job_workdir(job_id: str, job: dict) -> Optional[str]:
+    """Return a configured cron workdir if it still exists."""
+    job_workdir = (job.get("workdir") or "").strip() or None
+    if job_workdir and not Path(job_workdir).is_dir():
+        logger.warning(
+            "Job '%s': configured workdir %r no longer exists — running without it",
+            job_id, job_workdir,
+        )
+        return None
+    return job_workdir
+
+
 def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     """Build the effective prompt for a cron job, optionally loading one or more skills first.
 
@@ -799,7 +819,10 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         if prerun_script is not None:
             success, script_output = prerun_script
         else:
-            success, script_output = _run_job_script(script_path)
+            success, script_output = _run_job_script(
+                script_path,
+                cwd=_resolve_job_workdir(str(job.get("id") or "?"), job),
+            )
         if success:
             if script_output:
                 prompt = (
@@ -961,6 +984,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     job_id = job["id"]
     job_name = job["name"]
+    _job_workdir = _resolve_job_workdir(job_id, job)
 
     # ---------------------------------------------------------------
     # no_agent short-circuit — the script IS the job, no LLM involvement.
@@ -987,26 +1011,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             logger.error("Job '%s': %s", job_id, err)
             return False, "", "", err
 
-        # Apply workdir if configured — lets scripts use predictable relative
-        # paths. For no_agent jobs this is just the subprocess cwd (not an
-        # agent TERMINAL_CWD bridge).
-        _job_workdir = (job.get("workdir") or "").strip() or None
-        _prior_cwd = None
-        if _job_workdir and Path(_job_workdir).is_dir():
-            _prior_cwd = os.getcwd()
-            try:
-                os.chdir(_job_workdir)
-            except OSError:
-                _prior_cwd = None
-
-        try:
-            ok, output = _run_job_script(script_path)
-        finally:
-            if _prior_cwd is not None:
-                try:
-                    os.chdir(_prior_cwd)
-                except OSError:
-                    pass
+        ok, output = _run_job_script(script_path, cwd=_job_workdir)
 
         now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1089,7 +1094,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     prerun_script = None
     script_path = job.get("script")
     if script_path:
-        prerun_script = _run_job_script(script_path)
+        prerun_script = _run_job_script(script_path, cwd=_job_workdir)
         _ran_ok, _script_output = prerun_script
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(
@@ -1172,15 +1177,6 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # os.environ["TERMINAL_CWD"] here is safe for those jobs.  For workdir-less
     # jobs we leave TERMINAL_CWD untouched — preserves the original behaviour
     # (skip_context_files=True, tools use whatever cwd the scheduler has).
-    _job_workdir = (job.get("workdir") or "").strip() or None
-    if _job_workdir and not Path(_job_workdir).is_dir():
-        # Directory was removed between create-time validation and now.  Log
-        # and drop back to old behaviour rather than crashing the job.
-        logger.warning(
-            "Job '%s': configured workdir %r no longer exists — running without it",
-            job_id, _job_workdir,
-        )
-        _job_workdir = None
     _prior_terminal_cwd = os.environ.get("TERMINAL_CWD", "_UNSET_")
     if _job_workdir:
         os.environ["TERMINAL_CWD"] = _job_workdir

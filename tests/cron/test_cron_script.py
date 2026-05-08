@@ -111,6 +111,19 @@ class TestRunJobScript:
         assert success is True
         assert output == "relative works"
 
+    def test_script_uses_explicit_workdir(self, cron_env, tmp_path):
+        from cron.scheduler import _run_job_script
+
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+        script = cron_env / "scripts" / "cwd.py"
+        script.write_text("import os\nprint(os.getcwd())\n")
+
+        success, output = _run_job_script(str(script), cwd=str(workdir))
+
+        assert success is True
+        assert output == str(workdir)
+
     def test_script_not_found(self, cron_env):
         from cron.scheduler import _run_job_script
 
@@ -192,6 +205,44 @@ class TestBuildJobPromptWithScript:
         assert "## Script Output" in prompt
         assert "new PR: #123 fix typo" in prompt
         assert "Report any notable changes." in prompt
+
+    def test_script_output_uses_job_workdir(self, cron_env, tmp_path):
+        from cron.scheduler import _build_job_prompt
+
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+        script = cron_env / "scripts" / "cwd.py"
+        script.write_text("import os\nprint(os.getcwd())\n")
+
+        prompt = _build_job_prompt({
+            "id": "job-workdir",
+            "prompt": "Report cwd.",
+            "script": str(script),
+            "workdir": str(workdir),
+        })
+
+        assert str(workdir) in prompt
+        assert "Report cwd." in prompt
+
+    def test_no_agent_script_uses_job_workdir(self, cron_env, tmp_path):
+        from cron.scheduler import run_job
+
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+        script = cron_env / "scripts" / "cwd.py"
+        script.write_text("import os\nprint(os.getcwd())\n")
+
+        ok, _doc, output, error = run_job({
+            "id": "job-workdir",
+            "name": "Workdir script",
+            "script": str(script),
+            "workdir": str(workdir),
+            "no_agent": True,
+        })
+
+        assert ok is True
+        assert output == str(workdir)
+        assert error is None
 
     def test_script_error_injected(self, cron_env):
         from cron.scheduler import _build_job_prompt
