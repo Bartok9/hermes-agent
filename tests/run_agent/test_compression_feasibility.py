@@ -41,6 +41,7 @@ def _make_agent(
     agent.tool_progress_callback = None
     agent._compression_warning = None
     agent._aux_compression_context_length_config = None
+    agent._custom_providers = None
     agent.tools = []
 
     compressor = MagicMock(spec=ContextCompressor)
@@ -181,7 +182,78 @@ def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ct
         base_url="http://custom-endpoint:8080/v1",
         api_key="sk-custom",
         config_context_length=1_000_000,
+        custom_providers=None,
         provider="openrouter",
+    )
+
+
+@patch("agent.model_metadata.get_model_context_length", return_value=1_000_000)
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_feasibility_check_passes_custom_providers(mock_get_client, mock_ctx_len):
+    """Auto compression model context should honor custom_providers metadata."""
+    custom_providers = [
+        {
+            "name": "my-gateway",
+            "base_url": "https://ais.example.com/v1",
+            "models": {
+                "qwen/deepseek-v4-pro": {"context_length": 1_000_000},
+            },
+        }
+    ]
+    agent = _make_agent(main_context=1_000_000, threshold_percent=0.50)
+    agent.model = "qwen/deepseek-v4-pro"
+    agent.provider = "custom:my-gateway"
+    agent.base_url = "https://ais.example.com/v1"
+    agent._custom_providers = custom_providers
+    mock_client = MagicMock()
+    mock_client.base_url = "https://ais.example.com/v1"
+    mock_client.api_key = "sk-custom"
+    mock_get_client.return_value = (mock_client, "qwen/deepseek-v4-pro")
+
+    agent._emit_status = lambda msg: None
+    agent._check_compression_model_feasibility()
+
+    mock_ctx_len.assert_called_once_with(
+        "qwen/deepseek-v4-pro",
+        base_url="https://ais.example.com/v1",
+        api_key="sk-custom",
+        config_context_length=None,
+        custom_providers=custom_providers,
+        provider="custom:my-gateway",
+    )
+
+
+def test_context_compressor_passes_custom_providers_to_context_resolver():
+    custom_providers = [
+        {
+            "name": "my-gateway",
+            "base_url": "https://ais.example.com/v1",
+            "models": {
+                "qwen/deepseek-v4-pro": {"context_length": 1_000_000},
+            },
+        }
+    ]
+
+    with patch(
+        "agent.context_compressor.get_model_context_length", return_value=1_000_000
+    ) as mock_ctx_len:
+        compressor = ContextCompressor(
+            model="qwen/deepseek-v4-pro",
+            base_url="https://ais.example.com/v1",
+            api_key="sk-custom",
+            provider="custom:my-gateway",
+            custom_providers=custom_providers,
+            quiet_mode=True,
+        )
+
+    assert compressor.context_length == 1_000_000
+    mock_ctx_len.assert_called_once_with(
+        "qwen/deepseek-v4-pro",
+        base_url="https://ais.example.com/v1",
+        api_key="sk-custom",
+        config_context_length=None,
+        provider="custom:my-gateway",
+        custom_providers=custom_providers,
     )
 
 
@@ -204,6 +276,7 @@ def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_
         base_url="http://custom:8080/v1",
         api_key="sk-test",
         config_context_length=None,
+        custom_providers=None,
         provider="openrouter",
     )
 
@@ -257,6 +330,7 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
         base_url="http://custom-endpoint:8080/v1",
         api_key="sk-custom",
         config_context_length=1_000_000,
+        custom_providers=[],
         provider="",
     )
 
