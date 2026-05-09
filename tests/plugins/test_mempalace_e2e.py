@@ -8,6 +8,14 @@ from pathlib import Path
 
 import pytest
 
+# Skip entire module when mempalace is not installed so CI doesn't error
+# on ImportError.  The loader tests use the same pattern.
+_mempalace_installed = importlib.util.find_spec("mempalace") is not None
+pytestmark = pytest.mark.skipif(
+    not _mempalace_installed,
+    reason="mempalace package not installed",
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "mempalace"
 INIT_FILE = PLUGIN_DIR / "__init__.py"

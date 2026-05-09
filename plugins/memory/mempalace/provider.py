@@ -144,6 +144,24 @@ class MemPalaceMemoryProvider(MemPalaceHooksMixin, MemPalaceToolsMixin, MemoryPr
                 "mempalace package is not installed. "
                 "Install it with: pip install mempalace"
             )
+        # Tear down any previous writer thread and KG handle before re-creating
+        # so that a re-used cached provider (via load_memory_provider) doesn't
+        # leak resources on every gateway agent recreate.
+        if self._queue is not None:
+            try:
+                self._queue.shutdown()
+            except Exception:
+                pass
+            self._queue = None
+        if self._kg is not None:
+            try:
+                self._kg.close()
+            except Exception:
+                pass
+            self._kg = None
+        if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
+            self._prefetch_thread.join(timeout=2.0)
+            self._prefetch_thread = None
         self._session_id = session_id
         cfg = load_mempalace_config(
             kwargs.get("config", {}),

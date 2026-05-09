@@ -36,7 +36,9 @@ _MEMORY_PLUGINS_DIR = Path(__file__).parent
 # Cache provider instances so repeated load_memory_provider() calls
 # (e.g. when AIAgent is re-created per gateway message) reuse the same
 # object instead of allocating a fresh one each time.
+import threading as _threading
 _provider_instance_cache: Dict[str, "MemoryProvider"] = {}
+_provider_cache_lock = _threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -171,25 +173,34 @@ def load_memory_provider(name: str) -> Optional["MemoryProvider"]:
 
     Returns None if the provider is not found or fails to load.
     """
-    # Return cached instance if available
-    if name in _provider_instance_cache:
-        return _provider_instance_cache[name]
+    with _provider_cache_lock:
+        # Return cached instance if available and not shut down.
+        # A provider that has been shutdown() will have _collection=None;
+        # evict it so the next call gets a fresh instance.
+        cached = _provider_instance_cache.get(name)
+        if cached is not None:
+            # Check if the provider is still usable (has _collection or similar)
+            is_alive = getattr(cached, "_collection", True) is not None
+            if is_alive:
+                return cached
+            # Stale — evict and fall through to reload
+            del _provider_instance_cache[name]
 
-    provider_dir = find_provider_dir(name)
-    if not provider_dir:
-        logger.debug("Memory provider '%s' not found in bundled or user plugins", name)
-        return None
+        provider_dir = find_provider_dir(name)
+        if not provider_dir:
+            logger.debug("Memory provider '%s' not found in bundled or user plugins", name)
+            return None
 
-    try:
-        provider = _load_provider_from_dir(provider_dir)
-        if provider:
-            _provider_instance_cache[name] = provider
-            return provider
-        logger.warning("Memory provider '%s' loaded but no provider instance found", name)
-        return None
-    except Exception as e:
-        logger.warning("Failed to load memory provider '%s': %s", name, e)
-        return None
+        try:
+            provider = _load_provider_from_dir(provider_dir)
+            if provider:
+                _provider_instance_cache[name] = provider
+                return provider
+            logger.warning("Memory provider '%s' loaded but no provider instance found", name)
+            return None
+        except Exception as e:
+            logger.warning("Failed to load memory provider '%s': %s", name, e)
+            return None
 
 
 def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
