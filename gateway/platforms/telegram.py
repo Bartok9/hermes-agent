@@ -4383,13 +4383,22 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 # Check if supported
                 if ext not in SUPPORTED_DOCUMENT_TYPES:
+                    # Bug fix (#23045): reply directly to the user instead of injecting
+                    # the gateway error string into event.text and routing it through
+                    # handle_message.  The old path caused the agent to receive a fake
+                    # user message like "Unsupported document type '.epub'..." with no
+                    # indication it was gateway-generated, leading to confused loops.
                     supported_list = ", ".join(sorted(SUPPORTED_DOCUMENT_TYPES.keys()))
-                    event.text = (
-                        f"Unsupported document type '{ext or 'unknown'}'. "
-                        f"Supported types: {supported_list}"
+                    file_label = original_filename or f"document{ext or ''}"
+                    reply_text = (
+                        f"\u274c Unsupported file type: {file_label!r}\n"
+                        f"Supported document types: {supported_list}"
                     )
-                    logger.info("[Telegram] Unsupported document type: %s", ext or "unknown")
-                    await self.handle_message(event)
+                    logger.info("[Telegram] Unsupported document type: %s — notifying user directly", ext or "unknown")
+                    try:
+                        await msg.reply_text(reply_text)
+                    except Exception as reply_err:
+                        logger.warning("[Telegram] Could not send unsupported-type reply: %s", reply_err)
                     return
 
                 # Download and cache
@@ -4421,7 +4430,19 @@ class TelegramAdapter(BasePlatformAdapter):
                         )
 
             except Exception as e:
+                # Bug fix (#23045): cache failures were silently swallowed, leaving
+                # event.media_urls/media_types empty and delivering a broken event
+                # to the agent.  Notify the user directly and bail so the agent
+                # never receives a partial/empty attachment event.
                 logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)
+                try:
+                    await msg.reply_text(
+                        "\u274c Failed to process the attached document.  "
+                        "Please try sending it again or use a different format."
+                    )
+                except Exception as reply_err:
+                    logger.warning("[Telegram] Could not send cache-failure reply: %s", reply_err)
+                return
 
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:

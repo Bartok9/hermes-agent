@@ -108,6 +108,8 @@ def _make_message(document=None, caption=None, media_group_id=None, photo=None):
     msg.from_user.id = 1
     msg.from_user.full_name = "Test User"
     msg.message_thread_id = None
+    # reply_text must be an AsyncMock so the fixed code path can await it
+    msg.reply_text = AsyncMock()
     return msg
 
 
@@ -333,14 +335,31 @@ class TestDocumentDownloadBlock:
         assert event.media_types == ["application/pdf"]
 
     @pytest.mark.asyncio
+    async def test_unsupported_type_notifies_user_not_agent(self, adapter):
+        """Bug fix #23045: unsupported types must reply to user, not inject into agent pipeline."""
+        doc = _make_document(file_name="book.epub", mime_type="application/epub+zip", file_size=100)
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        # Agent pipeline must NOT receive a fake user message
+        adapter.handle_message.assert_not_called()
+        # User must receive the error reply directly
+        msg.reply_text.assert_awaited_once()
+        reply = msg.reply_text.call_args.args[0]
+        assert "book.epub" in reply or "Unsupported" in reply
+
+    @pytest.mark.asyncio
     async def test_missing_filename_and_mime_rejected(self, adapter):
         doc = _make_document(file_name=None, mime_type=None, file_size=100)
         msg = _make_message(document=doc)
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
-        event = adapter.handle_message.call_args[0][0]
-        assert "Unsupported" in event.text
+        # Agent pipeline must NOT receive the error string as a user message
+        adapter.handle_message.assert_not_called()
+        # User gets the error notification
+        msg.reply_text.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_unicode_decode_error_handled(self, adapter):
@@ -382,8 +401,8 @@ class TestDocumentDownloadBlock:
         assert "[Content of" not in (event.text or "")
 
     @pytest.mark.asyncio
-    async def test_download_exception_handled(self, adapter):
-        """If get_file() raises, the handler logs the error without crashing."""
+    async def test_download_exception_notifies_user_not_agent(self, adapter):
+        """Bug fix #23045: cache failures must notify user and NOT deliver a broken event to the agent."""
         doc = _make_document(file_name="crash.pdf", file_size=100)
         doc.get_file = AsyncMock(side_effect=RuntimeError("Telegram API down"))
         msg = _make_message(document=doc)
@@ -391,8 +410,12 @@ class TestDocumentDownloadBlock:
 
         # Should not raise
         await adapter._handle_media_message(update, MagicMock())
-        # handle_message should still be called (the handler catches the exception)
-        adapter.handle_message.assert_called_once()
+        # Agent must NOT receive a partial/empty event
+        adapter.handle_message.assert_not_called()
+        # User must get a friendly error message
+        msg.reply_text.assert_awaited_once()
+        reply = msg.reply_text.call_args.args[0]
+        assert "Failed" in reply or "failed" in reply or "process" in reply
 
 
 class TestVideoDownloadBlock:
