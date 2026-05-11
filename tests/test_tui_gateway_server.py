@@ -911,24 +911,32 @@ def _session(agent=None, **extra):
 
 
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
+    # session.close now finalizes in a background thread; give it time to finish.
     calls = {"hooks": []}
+    done_event = threading.Event()
+
+    def _slow_commit(history):
+        calls.setdefault("history", history)
 
     agent = types.SimpleNamespace(session_id="session-key")
-    agent.commit_memory_session = lambda history: calls.setdefault("history", history)
+    agent.commit_memory_session = _slow_commit
     server._sessions["sid"] = _session(
         agent=agent, history=[{"role": "user", "content": "hello"}]
     )
-    monkeypatch.setattr(
-        server,
-        "_notify_session_boundary",
-        lambda event, session_id: calls["hooks"].append((event, session_id)),
-    )
+
+    def _notify_hook(event, session_id):
+        calls["hooks"].append((event, session_id))
+        done_event.set()
+
+    monkeypatch.setattr(server, "_notify_session_boundary", _notify_hook)
 
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.close", "params": {"session_id": "sid"}}
         )
         assert resp["result"]["closed"] is True
+        # Wait for background finalization (up to 2s)
+        assert done_event.wait(timeout=2.0), "Background finalization did not complete in time"
         assert calls["history"] == [{"role": "user", "content": "hello"}]
         assert ("on_session_finalize", "session-key") in calls["hooks"]
     finally:
@@ -1035,6 +1043,48 @@ def test_ws_orphan_reap_disabled_when_grace_zero(monkeypatch):
     monkeypatch.setattr(server.threading, "Timer", _Timer)
     server._schedule_ws_orphan_reap("any-sid")
     assert fired["timer"] is False
+
+
+def test_session_close_returns_promptly_despite_slow_finalization(monkeypatch):
+    """session.close must not block the caller while memory commit runs. (#23642)
+
+    /clear in the TUI calls session.close and only then creates the new session.
+    If finalization is slow (e.g. memory commit + DB write), the TUI was left
+    stuck on the old context. Finalization now runs in a background thread so
+    the JSON-RPC response is immediate.
+    """
+    started = threading.Event()
+    finished = threading.Event()
+
+    def _slow_commit(history):
+        started.set()
+        time.sleep(0.3)  # Simulate a 300ms memory commit
+        finished.set()
+
+    agent = types.SimpleNamespace(session_id="slow-session")
+    agent.commit_memory_session = _slow_commit
+    server._sessions["slow-sid"] = _session(
+        agent=agent, history=[{"role": "user", "content": "hello"}]
+    )
+    monkeypatch.setattr(
+        server,
+        "_notify_session_boundary",
+        lambda event, session_id: None,
+    )
+
+    try:
+        t0 = time.monotonic()
+        resp = server.handle_request(
+            {"id": "1", "method": "session.close", "params": {"session_id": "slow-sid"}}
+        )
+        elapsed = time.monotonic() - t0
+        assert resp["result"]["closed"] is True
+        # Response must come back well before the slow commit finishes
+        assert elapsed < 0.25, f"session.close blocked for {elapsed:.3f}s (should be <0.25s)"
+        # The commit must still complete in the background
+        assert finished.wait(timeout=2.0), "Background commit did not complete"
+    finally:
+        server._sessions.pop("slow-sid", None)
 
 
 def test_init_session_fires_reset_hook(monkeypatch):
@@ -6298,13 +6348,16 @@ def test_session_close_rpc_delegates_to_close_session_by_id(monkeypatch):
     seen = []
     monkeypatch.setattr(
         server, "_close_session_by_id",
-        lambda sid, *, end_reason: bool(seen.append((sid, end_reason))) or True,
+        lambda sid, *, end_reason, background=False: bool(
+            seen.append((sid, end_reason, background))
+        )
+        or True,
     )
     resp = server.handle_request(
         {"id": "1", "method": "session.close", "params": {"session_id": "s9"}}
     )
     assert resp["result"] == {"closed": True}
-    assert seen == [("s9", "tui_close")]
+    assert seen == [("s9", "tui_close", True)]
 
 
 def test_close_sessions_for_transport_closes_flagged_repoints_rest(monkeypatch):

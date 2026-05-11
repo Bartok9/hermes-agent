@@ -442,17 +442,33 @@ def _attach_worker(sid: str, session: dict, worker) -> None:
     worker.close()
 
 
-def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
+def _close_session_by_id(
+    sid: str, *, end_reason: str = "tui_close", background: bool = False
+) -> bool:
     """Single idempotent teardown for one session: pop it under the sessions
     lock, then finalize, unregister notify, close agent + slash worker via the
     shared ``_teardown_session`` path. Returns True iff it closed a live
     session. The ``_finalized`` / worker ``_closed`` guards make concurrent or
-    repeat calls (e.g. session.close racing the WS-orphan reaper) harmless."""
+    repeat calls (e.g. session.close racing the WS-orphan reaper) harmless.
+
+    When ``background`` is True, teardown runs on a daemon thread so the caller
+    can return immediately after the session is detached from ``_sessions``.
+    """
     with _sessions_lock:
         session = _sessions.pop(sid, None)
     if session is None:
         return False
-    _teardown_session(session, end_reason=end_reason)
+    if background:
+        t = threading.Thread(
+            target=_teardown_session,
+            args=(session,),
+            kwargs={"end_reason": end_reason},
+            daemon=True,
+            name=f"session-close-{sid[:8]}",
+        )
+        t.start()
+    else:
+        _teardown_session(session, end_reason=end_reason)
     return True
 
 
@@ -4174,8 +4190,15 @@ def _(rid, params: dict) -> dict:
     # both tear the same session down. _close_session_by_id is the single
     # idempotent teardown path (pop + _teardown_session) and returns False
     # when the session is already gone.
+    # Finalize in a background thread so slow work — memory commit, DB write,
+    # hook execution — does not block the JSON-RPC response. The frontend awaits
+    # this response before session.create for the new session; latency here
+    # makes /clear feel stuck and leaves old context visible. (#23642)
     with _session_resume_lock:
-        return _ok(rid, {"closed": _close_session_by_id(sid, end_reason="tui_close")})
+        closed = _close_session_by_id(
+            sid, end_reason="tui_close", background=True
+        )
+    return _ok(rid, {"closed": closed})
 
 
 @method("session.branch")
