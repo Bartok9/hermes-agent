@@ -371,12 +371,51 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
 
     repairs = 0
 
+    # Pre-pass: merge consecutive assistant messages that each carry
+    # ``tool_calls``.  DeepSeek v4 and several other OpenAI-compatible
+    # providers return parallel tool calls as a *single* assistant turn
+    # with multiple tool_calls entries.  When Hermes records each call as
+    # a separate assistant message (e.g. during streaming), replaying
+    # that history to strict providers produces HTTP 400:
+    #   "An assistant message with 'tool_calls' must be followed by
+    #    tool messages responding to each 'tool_call_id'."
+    # This pre-pass runs before the orphan-tool-result filter (Pass 1)
+    # so the merged assistant turn's call ids are known when Pass 1
+    # validates the tool-result role messages that follow.
+    current: List[Dict] = []
+    for msg in messages:
+        if (
+            current
+            and isinstance(msg, dict)
+            and msg.get("role") == "assistant"
+            and msg.get("tool_calls")
+            and isinstance(current[-1], dict)
+            and current[-1].get("role") == "assistant"
+            and current[-1].get("tool_calls")
+        ):
+            prev = current[-1]
+            prev_calls = list(prev["tool_calls"])
+            prev_calls.extend(msg["tool_calls"])
+            prev["tool_calls"] = prev_calls
+            # Merge any text content from the duplicate turn.
+            prev_content = prev.get("content") or ""
+            new_content = msg.get("content") or ""
+            if isinstance(prev_content, str) and isinstance(new_content, str):
+                prev["content"] = (
+                    (prev_content + "\n" + new_content).strip()
+                    if new_content.strip()
+                    else prev_content
+                )
+            repairs += 1
+        else:
+            current.append(msg)
+
     # Pass 1: drop stray tool messages that don't follow a known
     # assistant tool_call_id. Uses a rolling set of known ids refreshed
     # on each assistant message.
     known_tool_ids: set = set()
     filtered: List[Dict] = []
-    for msg in messages:
+    for msg in current:
         if not isinstance(msg, dict):
             filtered.append(msg)
             continue

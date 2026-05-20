@@ -199,3 +199,154 @@ def test_repair_preserves_system_messages():
     AIAgent._repair_message_sequence(agent, messages)
 
     assert messages == original
+
+
+# ── Pass 3: merge consecutive assistant tool_calls messages (issue #29148) ─
+
+def test_repair_merges_two_consecutive_assistant_tool_calls():
+    """Two adjacent assistant-with-tool_calls messages collapse into one.
+
+    DeepSeek v4 and other strict OpenAI-compatible providers reject a
+    message history where parallel tool calls appear as separate assistant
+    turns:
+        assistant(tool_calls=[A]) → assistant(tool_calls=[B]) → tool(A) → tool(B)
+    The repair must produce:
+        assistant(tool_calls=[A, B]) → tool(A) → tool(B)
+    """
+    agent = _bare_agent()
+    messages = [
+        {"role": "user", "content": "run both"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_A", "type": "function",
+                            "function": {"name": "session_search", "arguments": "{}"}}],
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_B", "type": "function",
+                            "function": {"name": "search_files", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "call_A", "content": "result A"},
+        {"role": "tool", "tool_call_id": "call_B", "content": "result B"},
+    ]
+
+    repairs = AIAgent._repair_message_sequence(agent, messages)
+
+    assert repairs >= 1
+    # Only one assistant message should remain
+    assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_msgs) == 1
+    merged_calls = assistant_msgs[0]["tool_calls"]
+    assert len(merged_calls) == 2
+    call_ids = {tc["id"] for tc in merged_calls}
+    assert call_ids == {"call_A", "call_B"}
+    # Tool results still present and in correct order
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+
+
+def test_repair_merges_three_consecutive_assistant_tool_calls():
+    """Three adjacent assistant-with-tool_calls turns all collapse into one."""
+    agent = _bare_agent()
+    messages = [
+        {"role": "user", "content": "run three"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function",
+                            "function": {"name": "tool_x", "arguments": "{}"}}],
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c2", "type": "function",
+                            "function": {"name": "tool_y", "arguments": "{}"}}],
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c3", "type": "function",
+                            "function": {"name": "tool_z", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+        {"role": "tool", "tool_call_id": "c2", "content": "r2"},
+        {"role": "tool", "tool_call_id": "c3", "content": "r3"},
+    ]
+
+    repairs = AIAgent._repair_message_sequence(agent, messages)
+
+    assert repairs >= 2
+    assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_msgs) == 1
+    assert len(assistant_msgs[0]["tool_calls"]) == 3
+
+
+def test_repair_does_not_merge_text_only_assistants():
+    """Plain-text assistant messages must NOT be merged (no tool_calls)."""
+    agent = _bare_agent()
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "First thought"},
+        {"role": "assistant", "content": "Second thought"},
+    ]
+
+    AIAgent._repair_message_sequence(agent, messages)
+
+    # Both text assistant messages should still be separate
+    assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_msgs) == 2
+
+
+def test_repair_does_not_merge_tool_calls_separated_by_tool_result():
+    """Two assistant-with-tool_calls separated by a tool result are NOT merged."""
+    agent = _bare_agent()
+    messages = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "t1", "type": "function",
+                            "function": {"name": "f", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "t1", "content": "done"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "t2", "type": "function",
+                            "function": {"name": "g", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "t2", "content": "done2"},
+    ]
+    original_assistant_count = sum(1 for m in messages if m.get("role") == "assistant")
+
+    AIAgent._repair_message_sequence(agent, messages)
+
+    assert sum(1 for m in messages if m.get("role") == "assistant") == original_assistant_count
+
+
+def test_repair_preserves_message_count_for_valid_parallel_format():
+    """A correctly-formatted single assistant with multiple tool_calls is unchanged."""
+    agent = _bare_agent()
+    messages = [
+        {"role": "user", "content": "run both"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_A", "type": "function",
+                 "function": {"name": "session_search", "arguments": "{}"}},
+                {"id": "call_B", "type": "function",
+                 "function": {"name": "search_files", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_A", "content": "result A"},
+        {"role": "tool", "tool_call_id": "call_B", "content": "result B"},
+    ]
+    original = [dict(m) for m in messages]
+
+    repairs = AIAgent._repair_message_sequence(agent, messages)
+
+    assert repairs == 0
+    assert len(messages) == len(original)
