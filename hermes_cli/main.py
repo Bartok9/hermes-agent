@@ -8720,7 +8720,26 @@ def _cmd_update_pip(args):
 
     uv = shutil.which("uv")
     if uv:
-        cmd = [uv, "pip", "install", "--upgrade", "hermes-agent"]
+        # Detect whether hermes-agent was installed via `uv tool install`.
+        # `uv pip install --upgrade` requires an active virtual environment,
+        # but `uv tool install` installs into an isolated tool environment
+        # with no activatable venv.  In that case we must use
+        # `uv tool upgrade hermes-agent` instead.
+        try:
+            tool_list = subprocess.run(
+                [uv, "tool", "list"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            is_uv_tool = tool_list.returncode == 0 and "hermes-agent" in tool_list.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            is_uv_tool = False
+
+        if is_uv_tool:
+            cmd = [uv, "tool", "upgrade", "hermes-agent"]
+        else:
+            cmd = [uv, "pip", "install", "--upgrade", "hermes-agent"]
     else:
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hermes-agent"]
 
