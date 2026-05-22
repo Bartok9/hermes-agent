@@ -1116,8 +1116,44 @@ class HonchoMemoryProvider(MemoryProvider):
             ),
         }
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    @staticmethod
+    def _flatten_content(content: "str | list | None") -> str:
+        """Normalise OpenAI-style multimodal list content to a plain string.
+
+        Text parts are concatenated with a space; image_url / image parts are
+        replaced with the literal placeholder ``[image]`` so Honcho's user
+        representation still knows visuals were exchanged without storing raw
+        base-64 data.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        # Multimodal list: [{"type": "text", "text": "..."},
+        #                   {"type": "image_url", "image_url": {...}}, ...]
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                parts.append(str(item))
+                continue
+            kind = item.get("type", "")
+            if kind == "text":
+                parts.append(item.get("text", ""))
+            elif kind in ("image_url", "image"):
+                parts.append("[image]")
+            else:
+                # Unknown block type — include a generic placeholder
+                parts.append(f"[{kind}]")
+        return " ".join(filter(None, parts))
+
+    def sync_turn(self, user_content: "str | list | None", assistant_content: "str | list | None", *, session_id: str = "") -> None:
         """Record the conversation turn in Honcho (non-blocking).
+
+        *user_content* and *assistant_content* may be either a plain string or
+        an OpenAI-style multimodal list (``[{"type": "text", ...}, {"type":
+        "image_url", ...}]``).  Multimodal lists are flattened to a plain
+        string before sanitisation so that vision turns are recorded rather
+        than silently dropped.
 
         Messages exceeding the Honcho API limit (default 25k chars) are
         split into multiple messages with continuation markers.
@@ -1128,8 +1164,8 @@ class HonchoMemoryProvider(MemoryProvider):
             return
 
         msg_limit = self._config.message_max_chars if self._config else 25000
-        clean_user_content = sanitize_context(user_content or "").strip()
-        clean_assistant_content = sanitize_context(assistant_content or "").strip()
+        clean_user_content = sanitize_context(self._flatten_content(user_content)).strip()
+        clean_assistant_content = sanitize_context(self._flatten_content(assistant_content)).strip()
 
         def _sync():
             try:

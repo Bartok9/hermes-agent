@@ -592,6 +592,87 @@ class TestConcludeToolDispatch:
         assert session.add_message.call_args_list[1].args == ("assistant", "Visible answer")
 
 
+class TestSyncTurnMultimodalContent:
+    """sync_turn must handle OpenAI-style multimodal list content without raising.
+
+    Regression test for: honcho memory: sync_turn fails on multimodal (list)
+    content — vision turns not recorded (issue #30252).
+    """
+
+    def _make_provider(self):
+        from types import SimpleNamespace
+
+        provider = HonchoMemoryProvider()
+        provider._session_key = "telegram:999"
+        provider._manager = MagicMock()
+        provider._cron_skipped = False
+        provider._config = SimpleNamespace(message_max_chars=25000)
+        provider._session_initialized = True
+        session = MagicMock()
+        provider._manager.get_or_create.return_value = session
+        return provider, session
+
+    def test_multimodal_user_content_is_recorded(self):
+        """A multimodal list as user_content should not raise and should record text."""
+        provider, session = self._make_provider()
+        multimodal_content = [
+            {"type": "text", "text": "what colour is this?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ]
+        # Must not raise
+        provider.sync_turn(multimodal_content, "It is red.")
+        provider._sync_thread.join(timeout=1.0)
+
+        calls = session.add_message.call_args_list
+        assert calls[0].args[0] == "user"
+        assert "what colour is this?" in calls[0].args[1]
+        assert "[image]" in calls[0].args[1]
+        assert calls[1].args == ("assistant", "It is red.")
+
+    def test_image_only_content_uses_placeholder(self):
+        """A list with only an image block should record [image] placeholder."""
+        provider, session = self._make_provider()
+        provider.sync_turn(
+            [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,xyz"}}],
+            "I see a cat.",
+        )
+        provider._sync_thread.join(timeout=1.0)
+
+        calls = session.add_message.call_args_list
+        assert "[image]" in calls[0].args[1]
+
+    def test_plain_string_content_unchanged(self):
+        """Plain string content still passes through _flatten_content unchanged."""
+        provider, session = self._make_provider()
+        provider.sync_turn("hello world", "sure")
+        provider._sync_thread.join(timeout=1.0)
+
+        assert session.add_message.call_args_list[0].args == ("user", "hello world")
+
+    def test_none_content_does_not_raise(self):
+        """None user/assistant content should produce empty strings, not crash."""
+        provider, session = self._make_provider()
+        provider.sync_turn(None, None)  # type: ignore[arg-type]
+        provider._sync_thread.join(timeout=1.0)
+        # No messages should be recorded for empty content (both sides empty)
+        # — or they may be empty strings; either way no exception.
+
+    def test_flatten_content_static_method(self):
+        """_flatten_content handles all known block types correctly."""
+        assert HonchoMemoryProvider._flatten_content(None) == ""
+        assert HonchoMemoryProvider._flatten_content("hello") == "hello"
+        assert HonchoMemoryProvider._flatten_content([]) == ""
+        result = HonchoMemoryProvider._flatten_content([
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {}},
+            {"type": "image", "source": {}},
+            {"type": "custom_block"},
+        ])
+        assert "describe" in result
+        assert "[image]" in result
+        assert "[custom_block]" in result
+
+
 # ---------------------------------------------------------------------------
 # Message chunking
 # ---------------------------------------------------------------------------
