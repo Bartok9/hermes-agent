@@ -7228,7 +7228,7 @@ def _update_via_zip(args):
             )
         _install_python_dependencies_with_optional_fallback(pip_cmd)
 
-    _update_node_dependencies()
+    node_ok = _update_node_dependencies()
     # Core (Python deps + git pull / ZIP extract) is now complete; the CLI
     # is functional from this point onward. The web UI build below is
     # optional — a failure here only affects ``hermes dashboard``. Make
@@ -7258,7 +7258,12 @@ def _update_via_zip(args):
         pass
 
     print()
-    print("✓ Update complete!")
+    if not node_ok:
+        print("⚠ Update finished with warnings — Node.js dependencies may be incomplete.")
+        print("  Hermes is usable but 'hermes --tui' may not work until Node is refreshed.")
+        print("  Re-run 'hermes update' after installing a Linux-native Node.js.")
+    else:
+        print("✓ Update complete!")
     try:
         _print_curator_first_run_notice()
     except Exception as e:
@@ -7795,6 +7800,69 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
+def _is_wsl() -> bool:
+    """Return True when running inside Windows Subsystem for Linux.
+
+    Checks ``/proc/version`` for the string ``microsoft`` (case-insensitive),
+    which covers both WSL 1 and WSL 2.  The check is cheap and cached via
+    module-level ``functools.lru_cache`` semantics — called at most twice per
+    process (once for npm, once for the test path).
+    """
+    if sys.platform != "linux":
+        return False
+    try:
+        with open("/proc/version") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
+def _resolve_linux_npm() -> str | None:
+    """Find a Linux-native npm binary when running under WSL.
+
+    ``shutil.which("npm")`` may return a Windows ``.exe`` path (resolved via
+    the mixed PATH that WSL inherits from the Windows host).  A Windows npm
+    process cannot operate on WSL UNC paths (``\\\\wsl.localhost\\...``) and
+    will fail with ``EISDIR`` / symlink errors.
+
+    Strategy: prefer any npm whose resolved path is under ``/usr``, ``/home``,
+    or ``/opt`` (Linux-native prefixes) over anything under ``/mnt/`` (Windows
+    drives).  Falls back to the first ``shutil.which`` result if no Linux-native
+    binary is found.
+    """
+    import shutil
+
+    candidates = []
+    try:
+        import subprocess as _sp
+
+        result = _sp.run(
+            ["which", "-a", "npm"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        candidates = [c.strip() for c in result.stdout.splitlines() if c.strip()]
+    except Exception:
+        pass
+
+    if not candidates:
+        return shutil.which("npm")
+
+    linux_prefixes = ("/usr/", "/home/", "/opt/", "/nix/")
+    for candidate in candidates:
+        if any(candidate.startswith(p) for p in linux_prefixes):
+            return candidate
+
+    # All candidates appear to be Windows-mounted paths; log a warning and
+    # return the first one — it will likely fail, but the caller handles that.
+    logger.debug(
+        "_resolve_linux_npm: no Linux-native npm found in WSL; candidates: %s",
+        candidates,
+    )
+    return candidates[0]
+
+
 def _venv_scripts_dir() -> Path | None:
     """Return the venv Scripts directory if we're running inside the project venv."""
     venv_dir = PROJECT_ROOT / "venv"
@@ -8294,19 +8362,42 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
     return shutil.which("uv")
 
 
-def _update_node_dependencies() -> None:
-    npm = shutil.which("npm")
+def _update_node_dependencies() -> bool:
+    """Run npm install for all hermes Node trees.
+
+    Returns True if every install succeeded, False if one or more failed.
+    In WSL environments, ``shutil.which("npm")`` may resolve to a Windows
+    ``npm.cmd`` that cannot handle WSL UNC paths.  :func:`_resolve_linux_npm`
+    filters for a Linux-native binary first.
+    """
+    if _is_wsl():
+        npm = _resolve_linux_npm()
+    else:
+        npm = shutil.which("npm")
     if not npm:
-        return
+        return True  # Node not installed — skip silently, not a failure
+
+    # Guard against accidentally resolving the Windows npm.cmd inside WSL.
+    # Windows executables typically live under /mnt/{letter}/ in WSL.
+    if _is_wsl() and npm.startswith("/mnt/"):
+        print(
+            "  ⚠ npm resolved to a Windows path inside WSL — skipping Node refresh."
+        )
+        print(f"    ({npm})")
+        print(
+            "  Install Node.js inside WSL to update dependencies automatically."
+        )
+        return False
 
     paths = (
         ("repo root", PROJECT_ROOT),
         ("ui-tui", PROJECT_ROOT / "ui-tui"),
     )
     if not any((path / "package.json").exists() for _, path in paths):
-        return
+        return True
 
     print("→ Updating Node.js dependencies...")
+    all_ok = True
     for label, path in paths:
         if not (path / "package.json").exists():
             continue
@@ -8327,10 +8418,12 @@ def _update_node_dependencies() -> None:
             print(f"  ✓ {label}")
             continue
 
+        all_ok = False
         print(f"  ⚠ npm install failed in {label}")
         stderr = (result.stderr or "").strip() if result.stderr else ""
         if stderr:
             print(f"    {stderr.splitlines()[-1]}")
+    return all_ok
 
 
 class _UpdateOutputStream:
@@ -9307,7 +9400,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         _refresh_active_lazy_features()
 
-        _update_node_dependencies()
+        node_ok = _update_node_dependencies()
         # See note above (ZIP path): core is now complete, web UI build is
         # optional from a CLI perspective. Telegraphing this avoids the
         # "stuck at webui-build → reboot → broken install" trap (#33788).
@@ -9315,7 +9408,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _build_web_ui(PROJECT_ROOT / "web")
 
         print()
-        print("✓ Code updated!")
+        if not node_ok:
+            print("⚠ Code updated with warnings — Node.js refresh was skipped or failed.")
+            print("  Hermes is usable but 'hermes --tui' may not work until Node is refreshed.")
+        else:
+            print("✓ Code updated!")
 
         # After git pull, source files on disk are newer than cached Python
         # modules in this process.  Reload hermes_constants so that any lazy
