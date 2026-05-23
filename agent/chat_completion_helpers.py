@@ -76,6 +76,31 @@ def _ra():
 
 
 
+# DeepSeek silently returns HTTP 400 on request bodies over ~880 KB.
+# Raise a descriptive error before we waste a round-trip.  (#30771)
+_DEEPSEEK_BODY_LIMIT_BYTES = 880_000
+
+
+def _deepseek_preflight_body_check(agent, api_kwargs: dict) -> None:
+    """Raise ``ValueError`` if the serialised body exceeds DeepSeek's limit.
+
+    Only runs when the configured base_url points at api.deepseek.com so
+    other providers are unaffected.
+    """
+    if not base_url_host_matches(getattr(agent, "base_url", "") or "", "api.deepseek.com"):
+        return
+    try:
+        body_bytes = len(json.dumps(api_kwargs, default=str, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return  # serialisation failure — let the real call surface the error
+    if body_bytes >= _DEEPSEEK_BODY_LIMIT_BYTES:
+        raise ValueError(
+            f"Request body ({body_bytes:,} bytes) exceeds DeepSeek's "
+            f"~{_DEEPSEEK_BODY_LIMIT_BYTES:,}-byte limit. "
+            "Compress the context with /compress or reduce max_tokens before retrying."
+        )
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -90,6 +115,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     the main retry loop can try again with backoff / credential rotation /
     provider fallback.
     """
+    _deepseek_preflight_body_check(agent, api_kwargs)
     result = {"response": None, "error": None}
     request_client_holder = {"client": None}
     request_client_lock = threading.Lock()
