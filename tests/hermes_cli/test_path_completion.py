@@ -182,3 +182,44 @@ class TestFileSizeLabel:
 
     def test_nonexistent(self):
         assert _file_size_label("/nonexistent_xyz") == ""
+
+
+class TestGetProjectFilesWindowsCrossMount:
+    """_get_project_files() should skip paths on a different Windows mount point."""
+
+    def test_cross_mount_path_is_skipped(self, monkeypatch, tmp_path):
+        """Simulate rg returning a cross-mount path; expect it to be skipped, not crash."""
+        import subprocess
+
+        cwd = str(tmp_path)
+        cross_mount_path = "/dev/null" if os.sep == "/" else "D:\\other\\file.txt"
+
+        # Patch subprocess.run to return the cross-mount path as if rg emitted it.
+        class FakeProc:
+            returncode = 0
+            stdout = cross_mount_path + "\n"
+            stderr = ""
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeProc())
+
+        # Patch os.path.relpath to raise ValueError when called with the cross-mount path,
+        # simulating the Windows cross-drive behaviour regardless of the test platform.
+        original_relpath = os.path.relpath
+
+        def patched_relpath(path, start=None):
+            if path == cross_mount_path:
+                raise ValueError("path is on mount 'X:', start on mount 'Y:'")
+            return original_relpath(path, start) if start is not None else original_relpath(path)
+
+        monkeypatch.setattr(os.path, "relpath", patched_relpath)
+        # Ensure the path registers as absolute so the relpath branch is taken.
+        monkeypatch.setattr(os.path, "isabs", lambda p: p == cross_mount_path or os.path.isabs(p))
+
+        completer = SlashCommandCompleter()
+        # Bypass the rg/fd availability check by pre-clearing cache forcing a scan.
+        completer._file_cache_cwd = cwd
+
+        files = completer._get_project_files()
+
+        # The cross-mount path must not appear in the result; no exception was raised.
+        assert cross_mount_path not in files

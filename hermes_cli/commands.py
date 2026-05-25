@@ -1454,7 +1454,17 @@ class SlashCommandCompleter(Completer):
                     raw = proc.stdout.strip().split("\n")
                     # Store relative paths
                     for p in raw[:5000]:
-                        rel = os.path.relpath(p, cwd) if os.path.isabs(p) else p
+                        if os.path.isabs(p):
+                            try:
+                                rel = os.path.relpath(p, cwd)
+                            except ValueError:
+                                # Windows: os.path.relpath() raises ValueError
+                                # for cross-mount paths (e.g. \\.\\ device paths
+                                # or a different drive letter from cwd).  Skip
+                                # these paths rather than crashing the event loop.
+                                continue
+                        else:
+                            rel = p
                         files.append(rel)
                     break
             except (subprocess.TimeoutExpired, OSError):
