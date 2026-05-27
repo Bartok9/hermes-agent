@@ -508,3 +508,53 @@ class TestGenerateSummary:
         summary = await tc._generate_summary_async("Turn content", metrics)
 
         assert summary == "[CONTEXT SUMMARY]:"
+
+    def test_generate_summary_with_zero_retries_returns_string_not_none(self):
+        """With max_retries=0 the retry loop never runs.
+
+        Regression guard for issue #32847: previously the function returned
+        implicit None, which was then injected as a conversation "value" and
+        crashed downstream string operations.
+        """
+        config = CompressionConfig(max_retries=0)
+        tc = _make_compressor(config)
+        tc.client = MagicMock()
+        # Even if the client somehow returned a value, range(0) is empty,
+        # so the loop body — and this mock — are never reached.
+        tc.client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="unused"))]
+        )
+        metrics = TrajectoryMetrics()
+
+        summary = tc._generate_summary("Turn content", metrics)
+
+        assert summary is not None
+        assert isinstance(summary, str)
+        assert summary.startswith("[CONTEXT SUMMARY]")
+        assert "skipped" in summary.lower()
+        # The retry loop did not execute, so no API call was attempted.
+        assert metrics.summarization_api_calls == 0
+        tc.client.chat.completions.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_summary_async_with_zero_retries_returns_string_not_none(self):
+        """Async variant of the max_retries=0 regression guard for issue #32847."""
+        config = CompressionConfig(max_retries=0)
+        tc = _make_compressor(config)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="unused"))]
+            )
+        )
+        tc._get_async_client = MagicMock(return_value=mock_client)
+        metrics = TrajectoryMetrics()
+
+        summary = await tc._generate_summary_async("Turn content", metrics)
+
+        assert summary is not None
+        assert isinstance(summary, str)
+        assert summary.startswith("[CONTEXT SUMMARY]")
+        assert "skipped" in summary.lower()
+        assert metrics.summarization_api_calls == 0
+        mock_client.chat.completions.create.assert_not_called()

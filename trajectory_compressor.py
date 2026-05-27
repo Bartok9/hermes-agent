@@ -636,7 +636,16 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                 else:
                     # Fallback: create a basic summary
                     return "[CONTEXT SUMMARY]: [Summary generation failed - previous turns contained tool calls and responses that have been compressed to save context space.]"
-    
+
+        # Fallback when the retry loop never executes (max_retries=0).
+        # Without this, the function returns implicit None, which is then
+        # injected as message content downstream and crashes string ops.
+        self.logger.warning(
+            "Summary generation skipped (max_retries=%d); using placeholder",
+            self.config.max_retries,
+        )
+        return "[CONTEXT SUMMARY]: [Summary generation skipped - turns compressed without LLM summary.]"
+
     async def _generate_summary_async(self, content: str, metrics: TrajectoryMetrics) -> str:
         """
         Generate a summary of the compressed turns using OpenRouter (async version).
@@ -705,7 +714,16 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                 else:
                     # Fallback: create a basic summary
                     return "[CONTEXT SUMMARY]: [Summary generation failed - previous turns contained tool calls and responses that have been compressed to save context space.]"
-    
+
+        # Fallback when the retry loop never executes (max_retries=0).
+        # Without this, the function returns implicit None, which is then
+        # injected as message content downstream and crashes string ops.
+        self.logger.warning(
+            "Summary generation skipped (max_retries=%d); using placeholder",
+            self.config.max_retries,
+        )
+        return "[CONTEXT SUMMARY]: [Summary generation skipped - turns compressed without LLM summary.]"
+
     def compress_trajectory(
         self,
         trajectory: List[Dict[str, str]]
