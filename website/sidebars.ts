@@ -784,6 +784,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'reference/environment-variables',
             'reference/mcp-config-reference',
+            'reference/optional-mcps-catalog',
             'reference/model-catalog',
           ],
         },
