@@ -365,6 +365,32 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.server_error
         assert result.retryable is True
 
+    def test_500_status_sets_should_fallback_true(self):
+        """500s (non-validation) must advance fallback_providers.
+
+        Regression guard for issue #32961: returning should_fallback=False on
+        a genuine 500 caused Hermes to retry the same provider instead of
+        moving to the next fallback in the chain.
+        """
+        e = MockAPIError("Internal Server Error", status_code=500)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+        assert result.should_fallback is True
+
+    def test_502_status_sets_should_fallback_true(self):
+        """502s (non-validation) must advance fallback_providers.
+
+        Regression guard for issue #32961: a proxy returning 502 for a
+        deprecated model name needs the chain to advance to a different
+        provider — retrying the same one yields the identical 502.
+        """
+        e = MockAPIError("Bad Gateway", status_code=502)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+        assert result.should_fallback is True
+
     # ── Model not found ──
 
     def test_404_model_not_found(self):

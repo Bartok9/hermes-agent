@@ -781,7 +781,15 @@ def _classify_by_status(
                 retryable=False,
                 should_fallback=True,
             )
-        return result_fn(FailoverReason.server_error, retryable=True)
+        # Non-validation 500/502: a genuine upstream server error. Advance
+        # the fallback_providers chain (retrying the same provider that just
+        # returned 5xx is unlikely to help, and proxies returning 502 for
+        # deprecated model names need a different provider to make progress).
+        return result_fn(
+            FailoverReason.server_error,
+            retryable=True,
+            should_fallback=True,
+        )
 
     if status_code in {503, 529}:
         return result_fn(FailoverReason.overloaded, retryable=True)
