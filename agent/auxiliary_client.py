@@ -1832,14 +1832,23 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
 
 
 def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
-    """Build a CodexAuxiliaryClient for an xAI Grok OAuth-authenticated session.
+    """Build a plain OpenAI auxiliary client for an xAI Grok OAuth session.
 
-    xAI's ``/v1/responses`` endpoint speaks the OpenAI Responses API, so we
-    wrap a plain ``OpenAI`` client in ``CodexAuxiliaryClient`` to translate
-    ``chat.completions.create()`` calls into ``responses.stream()`` requests.
+    xAI OAuth tokens are scoped to the standard Chat Completions endpoint
+    (``/v1/chat/completions``) only — they are NOT authorized for the
+    Responses API. Wrapping the client in ``CodexAuxiliaryClient`` (which
+    translates chat.completions.create() calls into responses.stream()
+    requests) causes every auxiliary call to fail with HTTP 403:
+
+        'The OAuth2 access token could not be validated.
+         [WKE=unauthenticated:bad-credentials]'
+
+    Direct chat completions calls succeed with the same token. Fix: return
+    the plain ``OpenAI`` client — the upstream chat-completions code path
+    is what every other auxiliary task already expects. See #34171.
 
     The caller must pass an explicit model — pinning a default for Grok
-    would silently rot when xAI's allowlist drifts.  Returns ``(None, None)``
+    would silently rot when xAI's allowlist drifts. Returns ``(None, None)``
     when the user has not authenticated with xAI Grok OAuth.
     """
     if not model:
@@ -1852,9 +1861,11 @@ def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str
     if resolved is None:
         return None, None
     api_key, base_url = resolved
-    logger.debug("Auxiliary client: xAI OAuth (%s via Responses API)", model)
-    real_client = OpenAI(api_key=api_key, base_url=base_url)
-    return CodexAuxiliaryClient(real_client, model), model
+    logger.debug("Auxiliary client: xAI OAuth (%s via chat.completions)", model)
+    # #34171: do NOT wrap in CodexAuxiliaryClient. The OAuth token isn't
+    # authorized for /v1/responses; let the plain OpenAI client hit
+    # /v1/chat/completions like every other auxiliary path does.
+    return OpenAI(api_key=api_key, base_url=base_url), model
 
 
 def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
