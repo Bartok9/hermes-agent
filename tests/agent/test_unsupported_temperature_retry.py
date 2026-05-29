@@ -112,8 +112,12 @@ class TestCallLlmUnsupportedTemperatureRetry:
         retry_kwargs = client.chat.completions.create.call_args_list[1].kwargs
         assert first_kwargs["temperature"] == 0.3
         assert "temperature" not in retry_kwargs
-        # other kwargs preserved
-        assert retry_kwargs["max_tokens"] == 500
+        # other kwargs preserved. api.openai.com normalises max_tokens to
+        # max_completion_tokens (issue #34530), so accept either.
+        assert (
+            retry_kwargs.get("max_tokens") == 500
+            or retry_kwargs.get("max_completion_tokens") == 500
+        )
 
     def test_non_temperature_400_does_not_retry_as_temperature(self):
         """Unrelated 400s (e.g. bad tool role) must not silently drop temp."""
@@ -207,7 +211,12 @@ class TestAsyncCallLlmUnsupportedTemperatureRetry:
         retry_kwargs = client.chat.completions.create.call_args_list[1].kwargs
         assert first_kwargs["temperature"] == 0.3
         assert "temperature" not in retry_kwargs
-        assert retry_kwargs["max_tokens"] == 500
+        # api.openai.com normalises max_tokens to max_completion_tokens
+        # (issue #34530), so accept either form on the retry call.
+        assert (
+            retry_kwargs.get("max_tokens") == 500
+            or retry_kwargs.get("max_completion_tokens") == 500
+        )
 
     @pytest.mark.asyncio
     async def test_async_non_temperature_400_does_not_retry(self):
