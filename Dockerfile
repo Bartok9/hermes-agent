@@ -237,6 +237,14 @@ COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-r
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
 
+# Mark this as the official published image so `detect_install_method`
+# routes `hermes update` to the `docker pull` guidance ONLY here — not in a
+# user's own container running a regular git/pip install. Being inside *some*
+# container is not enough to assume "can't git-pull"; the baked-in
+# .hermes_build_sha (written via the HERMES_GIT_SHA build-arg below) is the
+# implicit marker, and this env var is the explicit, fork-friendly signal.
+ENV HERMES_DOCKER_IMAGE=1
+
 # `docker exec` privilege-drop shim. When operators run
 # `docker exec <c> hermes ...` they default to root, and any file the
 # command writes under $HERMES_HOME (auth.json, .env, config.yaml) ends

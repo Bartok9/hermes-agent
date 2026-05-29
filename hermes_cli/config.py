@@ -279,13 +279,48 @@ def get_managed_update_command() -> Optional[str]:
     return None
 
 
+def _is_official_docker_image() -> bool:
+    """True only for the official published ``nousresearch/hermes-agent`` image.
+
+    Being inside *some* container (``is_container()``) is NOT the same as being
+    the published image — users routinely run a regular git/pip install inside
+    their own Docker container.  Only the published image can't ``git pull``
+    itself (``.dockerignore`` excludes ``.git``), so only it should route
+    ``hermes update`` to the ``docker pull`` guidance.
+
+    Discriminators (most-specific first):
+
+    1. ``HERMES_DOCKER_IMAGE`` env opt-in — explicit signal for the published
+       image and for forks that build an equivalent image.
+    2. The baked-in ``.hermes_build_sha`` marker — written exclusively by this
+       repo's ``Dockerfile`` via the ``HERMES_GIT_SHA`` build-arg, and absent
+       from any source checkout or pip install (``.dockerignore`` excludes
+       ``.git``, and the file is never committed).
+
+    A generic container with neither marker falls through to normal git/pip
+    detection, so ``hermes update`` keeps working there.
+    """
+    if os.environ.get("HERMES_DOCKER_IMAGE", "").strip().lower() in _MANAGED_TRUE_VALUES:
+        return True
+    try:
+        from hermes_cli.build_info import get_build_sha
+        if get_build_sha():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def detect_install_method(project_root: Optional[Path] = None) -> str:
     """Detect how Hermes was installed: 'docker', 'nixos', 'homebrew', 'git', or 'pip'.
 
     Resolution order:
     1. Stamped ``~/.hermes/.install_method`` file (written by installers)
     2. HERMES_MANAGED env / .managed marker (NixOS, Homebrew)
-    3. Container detection (/.dockerenv, /run/.containerenv, cgroup)
+    3. Official published-image markers (HERMES_DOCKER_IMAGE / baked build SHA)
+       -> 'docker'.  NOTE: merely running inside a container is not enough —
+       a regular git/pip install in a user's own container still updates via
+       git/pip (see ``_is_official_docker_image``).
     4. .git directory presence -> 'git'
     5. Fallback -> 'pip'
     """
@@ -299,8 +334,7 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     managed = get_managed_system()
     if managed:
         return managed.lower().replace(" ", "-")
-    from hermes_constants import is_container
-    if is_container():
+    if _is_official_docker_image():
         return "docker"
     if project_root is None:
         project_root = Path(__file__).parent.parent.resolve()
