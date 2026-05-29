@@ -25,7 +25,7 @@ load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".en
 from hermes_cli.colors import Colors, color
 from hermes_cli.models import _HERMES_USER_AGENT
 from hermes_constants import OPENROUTER_MODELS_URL
-from utils import base_url_host_matches
+from utils import base_url_host_matches, base_url_hostname
 
 
 _PROVIDER_ENV_HINTS = (
@@ -1868,6 +1868,142 @@ def run_doctor(args):
             [f"Azure Foundry Entra: {err}. {hint}"],
         )
 
+    def _probe_local_model_server() -> _ConnectivityResult:
+        """Probe a configured local/loopback OpenAI-compatible server.
+
+        Targets the failure mode in issue #34477: a WSL2 user points
+        ``model.base_url`` at an Ollama server running on the Windows host
+        (``http://127.0.0.1:11434/v1``). ``/v1/models`` answers fine, but
+        ``/v1/chat/completions`` returns an empty body instantly and Hermes
+        surfaces a bare ``APIConnectionError`` with no actionable guidance.
+
+        The split-endpoint signature (``/models`` OK, ``/chat/completions``
+        empty/closed) is highly specific to a host-side proxy or firewall
+        that forwards GETs but drops the streaming POST — exactly the
+        WSL2-to-Windows-Ollama case. When we see it we emit the targeted
+        fix instead of a generic "unreachable".
+
+        Skipped entirely unless ``model.base_url`` is a loopback host, so it
+        never adds latency for cloud-provider users.
+        """
+        label = "Local model server".ljust(28)
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
+            if not isinstance(model_cfg, dict):
+                return _ConnectivityResult("Local model server", [], [])
+            base_url = str(model_cfg.get("base_url") or "").strip()
+        except Exception:
+            return _ConnectivityResult("Local model server", [], [])
+
+        if not base_url:
+            return _ConnectivityResult("Local model server", [], [])
+        # Only diagnose true loopback hosts here — LAN / WireGuard / cloud
+        # endpoints are covered by the provider-specific probes. Use the
+        # security-hardened hostname parser (not a substring match) so a
+        # crafted path like http://evil/127.0.0.1/v1 can't trigger this.
+        if base_url_hostname(base_url) not in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+            return _ConnectivityResult("Local model server", [], [])
+
+        v1 = base_url.rstrip("/")
+        if not v1.endswith("/v1"):
+            v1 += "/v1"
+
+        try:
+            import httpx
+        except Exception:
+            return _ConnectivityResult("Local model server", [], [])
+
+        # Step 1: does GET /v1/models work?
+        models_ok = False
+        models_err = ""
+        try:
+            r = httpx.get(v1 + "/models", timeout=5)
+            models_ok = r.status_code == 200
+            if not models_ok:
+                models_err = f"HTTP {r.status_code}"
+        except Exception as exc:
+            models_err = str(exc)
+
+        if not models_ok:
+            # Whole server is unreachable — generic local guidance.
+            return _ConnectivityResult(
+                "Local model server",
+                [(color("✗", Colors.RED), label,
+                  color(f"({v1}/models: {models_err})", Colors.DIM))],
+                [f"Local model server at {v1} is unreachable ({models_err}). "
+                 "Confirm the server is running and that base_url is correct."],
+            )
+
+        # Step 2: GET works — does a minimal POST /v1/chat/completions work?
+        chat_empty = False
+        chat_err = ""
+        try:
+            api_key = str(model_cfg.get("api_key") or "ollama").strip() or "ollama"
+            model_name = str(
+                model_cfg.get("default") or model_cfg.get("model") or ""
+            ).strip()
+            payload = {
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            if model_name:
+                payload["model"] = model_name
+            r = httpx.post(
+                v1 + "/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+                timeout=15,
+            )
+            body_text = (r.text or "").strip()
+            # The #34477 signature: empty/whitespace body returned instantly.
+            if not body_text:
+                chat_empty = True
+            elif r.status_code >= 400:
+                chat_err = f"HTTP {r.status_code}"
+        except Exception as exc:
+            # httpx.RemoteProtocolError / ReadError / connection-closed all
+            # land here — the proxy accepted the connection then dropped it.
+            chat_empty = True
+            chat_err = str(exc)
+
+        if chat_empty:
+            detail = "(/models OK, /chat/completions empty"
+            detail += f": {chat_err})" if chat_err else ")"
+            return _ConnectivityResult(
+                "Local model server",
+                [(color("✗", Colors.RED), label, color(detail, Colors.DIM))],
+                [
+                    f"{v1}/models responds but /chat/completions returns an "
+                    "empty body. This is the classic WSL2 → Windows-host Ollama "
+                    "split: a port proxy / firewall forwards GET probes but "
+                    "drops the streaming POST. Fixes: (1) run Ollama *inside* "
+                    "WSL2 so localhost:11434 is the same process; or (2) bind "
+                    "Ollama on Windows with OLLAMA_HOST=0.0.0.0:11434 and point "
+                    "base_url at the WSL gateway IP from /etc/resolv.conf "
+                    "(e.g. http://<nameserver-IP>:11434/v1), not 127.0.0.1; "
+                    "then (3) verify from inside WSL2 with "
+                    "`curl -s $BASE_URL/chat/completions -d '{...}'` returning "
+                    "a non-empty body.",
+                ],
+            )
+
+        if chat_err:
+            return _ConnectivityResult(
+                "Local model server",
+                [(color("⚠", Colors.YELLOW), label,
+                  color(f"(/chat/completions {chat_err})", Colors.DIM))],
+                [f"Local model server /chat/completions returned {chat_err}."],
+            )
+
+        return _ConnectivityResult(
+            "Local model server",
+            [(color("✓", Colors.GREEN), label, color(f"({v1})", Colors.DIM))],
+            [],
+        )
+
     # Build the probe submission list in display order
     _probes.append(("OpenRouter API", _probe_openrouter))
     _probes.append(("Anthropic API", _probe_anthropic))
@@ -1886,6 +2022,7 @@ def run_doctor(args):
 
     _probes.append(("AWS Bedrock", _probe_bedrock))
     _probes.append(("Azure Foundry (Entra ID)", _probe_azure_entra))
+    _probes.append(("Local model server", _probe_local_model_server))
 
     # Print a single status line so users see something happening, then
     # fan out. ``\r`` clears it once the first real result line lands.

@@ -1358,3 +1358,119 @@ class TestDoctorStaleMaxIterationsDrift:
             monkeypatch, tmp_path, fix=False, ghost=None, cfg_turns=400,
         )
         assert "shadows" not in out
+
+
+class TestDoctorLocalModelServerProbe:
+    """Probe for a configured local/loopback OpenAI-compatible server.
+
+    Covers issue #34477: WSL2 user points base_url at a Windows-host Ollama;
+    /v1/models answers but /v1/chat/completions returns an empty body.
+    """
+
+    def _run(self, monkeypatch, tmp_path, base_url, get_status=200,
+             post_text="", post_status=200, post_raises=False):
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(
+            "model:\n"
+            "  provider: ollama-launch\n"
+            f"  base_url: {base_url}\n"
+            "  default: gemma-4-abliterated\n"
+            "  api_key: ollama\n",
+            encoding="utf-8",
+        )
+        (home / ".env").write_text("", encoding="utf-8")
+        project = tmp_path / "project"
+        project.mkdir(exist_ok=True)
+
+        monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+        monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project)
+        monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+        # The local-server probe reads model.base_url via load_config(),
+        # which resolves the active profile from HERMES_HOME.
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        fake_model_tools = types.SimpleNamespace(
+            check_tool_availability=lambda *a, **kw: ([], []),
+            TOOLSET_REQUIREMENTS={},
+        )
+        monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+        try:
+            from hermes_cli import auth as _auth_mod
+            monkeypatch.setattr(_auth_mod, "get_nous_auth_status", lambda: {})
+            monkeypatch.setattr(_auth_mod, "get_codex_auth_status", lambda: {})
+            monkeypatch.setattr(_auth_mod, "get_xai_oauth_auth_status", lambda: {})
+        except Exception:
+            pass
+
+        get_calls = []
+        post_calls = []
+
+        def fake_get(url, headers=None, timeout=None):
+            get_calls.append(url)
+            return types.SimpleNamespace(status_code=get_status)
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            post_calls.append((url, json))
+            if post_raises:
+                import httpx as _httpx
+                raise _httpx.RemoteProtocolError("Server disconnected without sending a response.")
+            return types.SimpleNamespace(status_code=post_status, text=post_text)
+
+        import httpx
+        monkeypatch.setattr(httpx, "get", fake_get)
+        monkeypatch.setattr(httpx, "post", fake_post)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            doctor_mod.run_doctor(Namespace(fix=False))
+        return buf.getvalue(), get_calls, post_calls
+
+    def test_wsl2_empty_chat_body_emits_targeted_guidance(self, monkeypatch, tmp_path):
+        # /models OK, /chat/completions returns empty body -> #34477 signature.
+        out, get_calls, post_calls = self._run(
+            monkeypatch, tmp_path,
+            base_url="http://127.0.0.1:11434/v1",
+            get_status=200, post_text="", post_status=200,
+        )
+        assert "Local model server" in out
+        assert "WSL2" in out
+        assert "OLLAMA_HOST=0.0.0.0" in out
+        # It probed both endpoints.
+        assert any(u.endswith("/v1/models") for u in get_calls)
+        assert any(u.endswith("/v1/chat/completions") for u, _ in post_calls)
+
+    def test_wsl2_connection_drop_also_emits_guidance(self, monkeypatch, tmp_path):
+        # POST raises a transport error (connection accepted then dropped).
+        out, _, post_calls = self._run(
+            monkeypatch, tmp_path,
+            base_url="http://127.0.0.1:11434/v1",
+            get_status=200, post_raises=True,
+        )
+        assert "WSL2" in out
+        assert any(u.endswith("/v1/chat/completions") for u, _ in post_calls)
+
+    def test_healthy_local_server_reports_ok(self, monkeypatch, tmp_path):
+        out, _, post_calls = self._run(
+            monkeypatch, tmp_path,
+            base_url="http://127.0.0.1:11434/v1",
+            get_status=200,
+            post_text='{"choices":[{"message":{"content":"pong"}}]}',
+            post_status=200,
+        )
+        assert "Local model server" in out
+        assert "WSL2" not in out
+        assert any(u.endswith("/v1/chat/completions") for u, _ in post_calls)
+
+    def test_non_loopback_base_url_is_skipped(self, monkeypatch, tmp_path):
+        # A LAN/remote endpoint must not trigger the loopback-only probe,
+        # and must never POST to /chat/completions from the local probe.
+        out, _, post_calls = self._run(
+            monkeypatch, tmp_path,
+            base_url="http://192.168.1.50:11434/v1",
+            get_status=200, post_text="", post_status=200,
+        )
+        # The local-server probe stays silent for non-loopback hosts.
+        assert "WSL2" not in out
+        assert not any(u.endswith("/v1/chat/completions") for u, _ in post_calls)
