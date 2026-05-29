@@ -746,3 +746,59 @@ class TestMcpLogin:
         assert "Authenticated — 3 tool(s) available" in out
         assert "no OAuth token" not in out
 
+
+
+class TestProbeSingleServerMcpMissing:
+    """#34220: ``_probe_single_server`` must fail fast with an actionable
+    error when the ``mcp`` Python SDK is not installed.
+
+    Previously the missing-SDK case fell through to ``_connect_server`` →
+    ``MCPServerTask.run`` → ``_run_stdio``, where ``_MCP_AVAILABLE`` is
+    finally checked and ``ImportError`` is raised. But that error was
+    wrapped by the per-attempt retry-backoff loop and surfaced to the
+    user as ``TimeoutError: MCP call timed out after 15.0s`` (or, in
+    earlier versions, ``NameError: name 'StdioServerParameters' is not
+    defined`` — the original report).
+
+    The fix is a fast-path check at the top of ``_probe_single_server``
+    that raises ``ImportError`` with the canonical install hint and zero
+    retries.
+    """
+
+    def test_probe_raises_importerror_fast_when_mcp_missing(self, monkeypatch):
+        """When ``_MCP_AVAILABLE`` is False, the probe must raise
+        ``ImportError`` synchronously with the actionable install hint."""
+        from hermes_cli import mcp_config
+
+        # Patch the module-level flag the probe imports.
+        import tools.mcp_tool as mcp_tool
+        monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", False, raising=False)
+
+        with pytest.raises(ImportError) as exc_info:
+            mcp_config._probe_single_server(
+                "ghost-server",
+                {"command": "echo", "args": ["hi"]},
+                connect_timeout=5,
+            )
+
+        msg = str(exc_info.value)
+        assert "mcp" in msg.lower()
+        assert "hermes-agent[mcp]" in msg, (
+            "Install hint must point to the [mcp] extras"
+        )
+
+    def test_probe_actionable_error_mentions_pipx_inject(self, monkeypatch):
+        """The error must mention ``pipx inject`` since pipx installs are
+        the most common shape that hits this (the issue reporter's
+        configuration)."""
+        from hermes_cli import mcp_config
+        import tools.mcp_tool as mcp_tool
+
+        monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", False, raising=False)
+
+        with pytest.raises(ImportError) as exc_info:
+            mcp_config._probe_single_server(
+                "ghost-server", {"command": "echo"}, connect_timeout=5
+            )
+
+        assert "pipx inject" in str(exc_info.value)
