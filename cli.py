@@ -4021,9 +4021,31 @@ class HermesCLI:
     # ── Streaming display ────────────────────────────────────────────────
 
     def _current_reasoning_callback(self):
-        """Return the active reasoning display callback for the current mode."""
+        """Return the active reasoning display callback for the current mode.
+
+        Combinations:
+        - show_reasoning=True, streaming=True  → token-by-token live reasoning
+          box rendered inline above the response (_stream_reasoning_delta).
+        - show_reasoning=True, streaming=False → buffered preview that flushes
+          on natural boundaries (_on_reasoning + _flush_reasoning_preview).
+          Previously this combination returned None, so users with
+          streaming=False never saw reasoning even with show_reasoning=True
+          (#34209). The buffered preview path already exists for the
+          verbose-without-show_reasoning case; reusing it gives the
+          non-streaming user a real reasoning render without changing the
+          rest of their CLI output behavior.
+        - verbose=True, show_reasoning=False   → minimal preview so users
+          see *that* the model is thinking without a full reasoning dump.
+        - otherwise                            → no reasoning callback.
+        """
         if self.show_reasoning and self.streaming_enabled:
             return self._stream_reasoning_delta
+        if self.show_reasoning and not self.streaming_enabled:
+            # #34209: non-streaming CLI users still want reasoning visible.
+            # _on_reasoning buffers tokens and _flush_reasoning_preview
+            # emits them as compact [thinking] blocks — the same render
+            # path used today by the verbose+!show_reasoning branch below.
+            return self._on_reasoning
         if self.verbose and not self.show_reasoning:
             return self._on_reasoning
         return None

@@ -386,10 +386,18 @@ class TestReasoningDisplayModeSelection(unittest.TestCase):
         cli._on_reasoning = lambda text: ("preview", text)
         return cli
 
-    def test_show_reasoning_non_streaming_uses_final_box_only(self):
+    def test_show_reasoning_non_streaming_uses_buffered_preview(self):
+        """#34209 regression: when show_reasoning=True and streaming=False,
+        the CLI should use the buffered preview callback (_on_reasoning)
+        so reasoning content is still rendered. Previously this returned
+        None, leaving non-streaming users unable to see reasoning at all.
+        """
         cli = self._make_cli(show_reasoning=True, streaming_enabled=False, verbose=False)
 
-        self.assertIsNone(cli._current_reasoning_callback())
+        callback = cli._current_reasoning_callback()
+        self.assertIsNotNone(callback)
+        # Routes to the buffered-preview path, NOT the live-stream path.
+        self.assertEqual(callback("x"), ("preview", "x"))
 
     def test_show_reasoning_streaming_uses_live_reasoning_box(self):
         cli = self._make_cli(show_reasoning=True, streaming_enabled=True, verbose=False)
@@ -404,6 +412,28 @@ class TestReasoningDisplayModeSelection(unittest.TestCase):
         callback = cli._current_reasoning_callback()
         self.assertIsNotNone(callback)
         self.assertEqual(callback("x"), ("preview", "x"))
+
+    def test_no_callback_when_all_options_off(self):
+        """Default state (no reasoning options) should return no callback."""
+        cli = self._make_cli(show_reasoning=False, streaming_enabled=False, verbose=False)
+        self.assertIsNone(cli._current_reasoning_callback())
+
+    def test_no_callback_when_streaming_only(self):
+        """Streaming on but show_reasoning + verbose off — no reasoning render."""
+        cli = self._make_cli(show_reasoning=False, streaming_enabled=True, verbose=False)
+        self.assertIsNone(cli._current_reasoning_callback())
+
+    def test_show_reasoning_takes_precedence_over_verbose(self):
+        """When both show_reasoning and verbose are True, show_reasoning
+        wins (caller gets the show_reasoning render, not the minimal verbose
+        preview). Both paths use _on_reasoning in non-streaming mode, but
+        the precedence ordering still matters when streaming is on.
+        """
+        cli = self._make_cli(show_reasoning=True, streaming_enabled=True, verbose=True)
+        # show_reasoning + streaming → live stream, not the verbose preview.
+        callback = cli._current_reasoning_callback()
+        self.assertIsNotNone(callback)
+        self.assertEqual(callback("x"), ("stream", "x"))
 
 
 # ---------------------------------------------------------------------------
