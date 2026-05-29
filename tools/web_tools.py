@@ -121,6 +121,24 @@ logger = logging.getLogger(__name__)
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _has_env(name: str) -> bool:
+    """Return True when *name* has a non-empty value visible via Hermes
+    config OR the process environment.
+
+    Hermes' config layer (~/.hermes/config.yaml + .env) supplies values
+    that the live os.environ doesn't necessarily see (a gateway worker
+    spawned via systemd has a different env than the CLI). See #34290 —
+    SearXNG appeared unavailable because os.getenv("SEARXNG_URL") was
+    empty even though the user had set it via ``hermes config set``.
+    """
+    # 1. Hermes config-aware lookup (what the user most likely set).
+    try:
+        from hermes_cli.config import get_env_value
+        val = get_env_value(name)
+        if val and val.strip():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    # 2. Process environment fallback.
     val = os.getenv(name)
     return bool(val and val.strip())
 
@@ -1175,7 +1193,16 @@ if __name__ == "__main__":
         elif backend == "tavily":
             print("   Using Tavily API (https://tavily.com)")
         elif backend == "searxng":
-            print(f"   Using SearXNG (search only): {os.getenv('SEARXNG_URL', '').strip()}")
+            # Resolve via Hermes config-first lookup (#34290) so the diagnostic
+            # print matches what the provider actually sees, not just shell env.
+            try:
+                from hermes_cli.config import get_env_value
+                _sxng_url = (get_env_value("SEARXNG_URL") or "").strip()
+            except Exception:  # noqa: BLE001
+                _sxng_url = ""
+            if not _sxng_url:
+                _sxng_url = os.getenv("SEARXNG_URL", "").strip()
+            print(f"   Using SearXNG (search only): {_sxng_url}")
         elif backend == "brave-free":
             print("   Using Brave Search free tier (search only)")
         elif backend == "ddgs":

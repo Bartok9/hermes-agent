@@ -31,6 +31,33 @@ from agent.web_search_provider import WebSearchProvider
 logger = logging.getLogger(__name__)
 
 
+def _resolve_searxng_url() -> str:
+    """Resolve ``SEARXNG_URL`` from Hermes config first, then process env.
+
+    Hermes supports declaring env values inside ~/.hermes/config.yaml (via
+    ``env:`` section) and the per-profile .env file. Those values are
+    visible through ``hermes_cli.config.get_env_value()`` but are NOT
+    necessarily exported to the live process environment that
+    ``os.getenv()`` sees — the gateway, the agent runtime, and shell
+    invocations may all see different snapshots.
+
+    Falling back to ``os.getenv()`` last preserves the existing behavior
+    for users who set SEARXNG_URL purely via shell exports / systemd
+    unit Environment=. See #34290.
+    """
+    # 1. Hermes config / .env handling (the source the user most likely
+    #    edited via ``hermes config set`` or ``hermes tools``).
+    try:
+        from hermes_cli.config import get_env_value
+        val = get_env_value("SEARXNG_URL")
+        if val:
+            return val.strip()
+    except Exception:  # noqa: BLE001 — fall back silently to process env
+        pass
+    # 2. Process environment (legacy / shell / systemd Environment=).
+    return os.getenv("SEARXNG_URL", "").strip()
+
+
 class SearXNGWebSearchProvider(WebSearchProvider):
     """Search via a user-hosted SearXNG instance."""
 
@@ -43,8 +70,8 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         return "SearXNG"
 
     def is_available(self) -> bool:
-        """Return True when ``SEARXNG_URL`` is set."""
-        return bool(os.getenv("SEARXNG_URL", "").strip())
+        """Return True when ``SEARXNG_URL`` is set (config or env)."""
+        return bool(_resolve_searxng_url())
 
     def supports_search(self) -> bool:
         return True
@@ -56,7 +83,7 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         """Execute a search against the configured SearXNG instance."""
         import httpx
 
-        base_url = os.getenv("SEARXNG_URL", "").strip().rstrip("/")
+        base_url = _resolve_searxng_url().rstrip("/")
         if not base_url:
             return {"success": False, "error": "SEARXNG_URL is not set"}
 

@@ -329,3 +329,98 @@ class TestSearXNGOnlyExtractCrawlErrors:
         result = json.loads(result_str)
         assert result["success"] is False
         assert "search-only" in result["error"].lower() or "SearXNG" in result["error"]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# #34290 — SEARXNG_URL resolution prefers Hermes config over process env
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestSearXNGConfigAwareEnvResolution:
+    """Regression tests for #34290.
+
+    Before this fix, SearXNG provider read os.getenv('SEARXNG_URL') only.
+    Users who set the URL via `hermes config set` (which writes to the
+    Hermes-managed config / .env layer) got 'SEARXNG_URL is not set'
+    because the live process env was unchanged.
+    """
+
+    def test_provider_uses_config_value_when_process_env_empty(self, monkeypatch):
+        """Provider sees the URL from get_env_value() even when os.environ
+        does NOT have SEARXNG_URL set."""
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+
+        monkeypatch.delenv("SEARXNG_URL", raising=False)
+
+        def fake_get_env_value(name):
+            if name == "SEARXNG_URL":
+                return "https://configured.example.com"
+            return None
+
+        # Patch hermes_cli.config.get_env_value
+        import hermes_cli.config as _cfg
+        monkeypatch.setattr(_cfg, "get_env_value", fake_get_env_value, raising=False)
+
+        provider = SearXNGWebSearchProvider()
+        assert provider.is_available() is True
+
+    def test_provider_falls_back_to_process_env(self, monkeypatch):
+        """If Hermes config has no SEARXNG_URL, fall back to process env
+        (preserves legacy / shell-export behavior)."""
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+
+        monkeypatch.setenv("SEARXNG_URL", "https://from-env.example.com")
+
+        # Hermes config layer returns None
+        import hermes_cli.config as _cfg
+        monkeypatch.setattr(_cfg, "get_env_value", lambda _n: None, raising=False)
+
+        provider = SearXNGWebSearchProvider()
+        assert provider.is_available() is True
+
+    def test_provider_reports_unavailable_when_neither_set(self, monkeypatch):
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+
+        monkeypatch.delenv("SEARXNG_URL", raising=False)
+
+        import hermes_cli.config as _cfg
+        monkeypatch.setattr(_cfg, "get_env_value", lambda _n: None, raising=False)
+
+        provider = SearXNGWebSearchProvider()
+        assert provider.is_available() is False
+
+    def test_resolve_helper_prefers_config_over_env(self, monkeypatch):
+        """When BOTH config and process env have a value, config wins —
+        because the user most likely intended `hermes config set` to be
+        authoritative."""
+        from plugins.web.searxng.provider import _resolve_searxng_url
+
+        monkeypatch.setenv("SEARXNG_URL", "https://from-env.example.com")
+
+        import hermes_cli.config as _cfg
+        monkeypatch.setattr(
+            _cfg,
+            "get_env_value",
+            lambda n: "https://from-config.example.com" if n == "SEARXNG_URL" else None,
+            raising=False,
+        )
+
+        assert _resolve_searxng_url() == "https://from-config.example.com"
+
+    def test_has_env_helper_in_web_tools_is_config_aware(self, monkeypatch):
+        """_has_env('SEARXNG_URL') in tools/web_tools.py must also honor
+        Hermes config, not just process env. Otherwise the backend
+        selection logic at line 156 keeps reporting SearXNG unavailable."""
+        from tools.web_tools import _has_env
+
+        monkeypatch.delenv("SEARXNG_URL", raising=False)
+
+        import hermes_cli.config as _cfg
+        monkeypatch.setattr(
+            _cfg,
+            "get_env_value",
+            lambda n: "https://x" if n == "SEARXNG_URL" else None,
+            raising=False,
+        )
+
+        assert _has_env("SEARXNG_URL") is True
