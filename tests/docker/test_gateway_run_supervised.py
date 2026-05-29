@@ -369,6 +369,16 @@ def test_supervised_gateway_stdout_reaches_docker_logs(
     )
     combined = logs.stdout + logs.stderr
 
+    # The rotated log dir is nested per-container by default
+    # (issue #34457): logs/gateways/default/<container-id>/current.
+    # Resolve the actual `current` file via glob so this test is
+    # agnostic to the flat-vs-nested layout. There is exactly one
+    # gateway in this single-container run.
+    cat_current = (
+        "sh -c 'cat \"$(find /opt/data/logs/gateways/default "
+        "-name current -type f | head -n1)\"'"
+    )
+
     # The banner ⚕ symbol is the load-bearing assertion — it's unique
     # to gateway startup stdout output and won't appear in stderr
     # (Python logging) or s6 boot messages.
@@ -377,16 +387,14 @@ def test_supervised_gateway_stdout_reaches_docker_logs(
         "This means the `1` action directive in _render_log_run isn't "
         "forwarding stdout to /init. "
         f"docker logs (last 2000 chars):\n{combined[-2000:]}\n"
-        f"file contents:\n{_sh(container_name, 'cat /opt/data/logs/gateways/default/current').stdout}"
+        f"file contents:\n{_sh(container_name, cat_current).stdout}"
     )
 
     # Cross-check: the same banner must also be in the rotated log
     # file (we kept the file destination, just added stdout). The
     # file version has s6-log's ISO 8601 timestamp prefix; the
     # docker logs version is raw.
-    file_contents = _sh(
-        container_name, "cat /opt/data/logs/gateways/default/current",
-    ).stdout
+    file_contents = _sh(container_name, cat_current).stdout
     assert "⚕" in file_contents or "Hermes Gateway Starting" in file_contents, (
         "Banner also missing from rotated log file — the file "
         "destination may have been dropped by the new s6-log script. "

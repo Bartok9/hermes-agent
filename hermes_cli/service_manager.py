@@ -666,6 +666,41 @@ class S6ServiceManager:
             so even output that lacked a Python-logger timestamp
             (rich banners, third-party libs' raw prints) is
             correlatable in ``current``.
+
+        Multi-container shared-volume safety (issue #34457):
+        ``s6-log`` takes an *exclusive* lock on its log directory
+        (``<log_dir>/lock``) to guarantee a single writer. When two
+        containers (e.g. a gateway sidecar and a dashboard sidecar)
+        bind-mount the **same** host data volume to keep SQLite state
+        and config in sync, both run a ``gateway-default`` s6-log
+        against the *same* ``logs/gateways/default`` path. The first
+        container claims the lock; the second's ``s6-log`` dies with
+        ``unable to take lock`` and ``s6-supervise`` restarts it
+        instantly — an endless sub-second crash loop that hammers the
+        host disk.
+
+        Fix: by default, nest the log directory under a per-container
+        token so each container locks a distinct path while still
+        persisting under the shared volume. The token is the container
+        identity — ``HERMES_CONTAINER_ID`` if the operator sets one,
+        else ``$HOSTNAME`` (Docker seeds this with the unique container
+        ID by default). The resulting layout is
+        ``logs/gateways/<profile>/<container>/current``.
+
+        The token is resolved portably (the script runs under
+        ``with-contenv sh`` — dash/execline, not bash — where
+        ``$HOSTNAME`` is not guaranteed to be exported): prefer the
+        ``HERMES_CONTAINER_ID`` override, then ``$HOSTNAME`` if the
+        shell happens to export it, then the ``hostname`` command, then
+        ``/etc/hostname``. Docker populates all three of the latter with
+        the unique container ID by default.
+
+        Backwards-compat: operators who deliberately run a single
+        container (the overwhelmingly common case) and want the legacy
+        flat ``logs/gateways/<profile>/current`` path can set
+        ``HERMES_GATEWAY_LOG_PER_CONTAINER=0``. When the per-container
+        token can't be resolved (no HOSTNAME, no override) we also fall
+        back to the flat path rather than inventing an unstable token.
         """
         import shlex
         prof = shlex.quote(profile)
@@ -673,7 +708,25 @@ class S6ServiceManager:
             f"#!/command/with-contenv sh\n"
             f"# shellcheck shell=sh\n"
             f': "${{HERMES_HOME:=/opt/data}}"\n'
-            f'log_dir="$HERMES_HOME/logs/gateways/{prof}"\n'
+            f'base_dir="$HERMES_HOME/logs/gateways/{prof}"\n'
+            f'log_dir="$base_dir"\n'
+            f'# Per-container log dir avoids s6-log lock collisions when\n'
+            f'# multiple containers share one data volume (issue #34457).\n'
+            f'# Opt out with HERMES_GATEWAY_LOG_PER_CONTAINER=0.\n'
+            f'case "${{HERMES_GATEWAY_LOG_PER_CONTAINER:-1}}" in\n'
+            f'    0|false|FALSE|False|no|NO|No) ;;\n'
+            f'    *)\n'
+            f'        # POSIX sh: $HOSTNAME is not guaranteed (SC3028);\n'
+            f'        # fall back to the hostname command / /etc/hostname.\n'
+            f'        container_id="${{HERMES_CONTAINER_ID:-}}"\n'
+            f'        [ -n "$container_id" ] || container_id="${{HOSTNAME:-}}"\n'
+            f'        [ -n "$container_id" ] || container_id="$(hostname 2>/dev/null || true)"\n'
+            f'        [ -n "$container_id" ] || container_id="$(cat /etc/hostname 2>/dev/null || true)"\n'
+            f'        if [ -n "$container_id" ]; then\n'
+            f'            log_dir="$base_dir/$container_id"\n'
+            f'        fi\n'
+            f'        ;;\n'
+            f'esac\n'
             f'mkdir -p "$log_dir"\n'
             f'chown -R hermes:hermes "$log_dir" 2>/dev/null || true\n'
             # Skip the drop when already non-root (CAP_SETGID).

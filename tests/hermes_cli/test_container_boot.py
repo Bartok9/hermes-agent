@@ -99,6 +99,10 @@ def test_running_profile_is_registered_and_autostarted(tmp_path: Path) -> None:
     assert (svc / "type").read_text().strip() == "longrun"
     # Auto-start means no down-marker.
     assert not (svc / "down").exists()
+    # ...and the log/ sub-service must be free to run so the gateway's
+    # output is captured (issue #34480: the logger marker must not be
+    # set for an owned/started profile).
+    assert not (svc / "log" / "down").exists()
 
 
 def test_stopped_profile_is_registered_but_not_started(tmp_path: Path) -> None:
@@ -114,6 +118,12 @@ def test_stopped_profile_is_registered_but_not_started(tmp_path: Path) -> None:
     )]
     # down marker tells s6-svscan to NOT start the service.
     assert (scandir / "gateway-writer" / "down").exists()
+    # The log/ sub-service is supervised independently of its producer,
+    # so a down marker on the parent does NOT cascade. Without an
+    # explicit log/down, a container that doesn't own this profile would
+    # still start gateway-writer/log's s6-log and crash-loop on the
+    # shared-volume lock (issue #34480). Assert the logger is also down.
+    assert (scandir / "gateway-writer" / "log" / "down").exists()
 
 
 def test_startup_failed_does_not_autostart(tmp_path: Path) -> None:

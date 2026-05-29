@@ -251,6 +251,15 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
     s6-svscan starts scanning the dynamic scandir — the manager's
     ``s6-svscanctl -a`` call would fail with no control socket.
 
+    Multi-container shared-volume safety (issue #34480): when a
+    profile is registered in the *down* state (this container does not
+    own it), a ``down`` marker is written to BOTH the service slot and
+    its ``log/`` sub-service. s6 supervises the producer and its logger
+    independently, so a parent ``down`` does not cascade — without the
+    logger marker, every non-owning container still starts a
+    ``gateway-<profile>/log`` s6-log that crash-loops on the shared
+    lock.
+
     Atomicity: build the new layout in a sibling temp directory and
     rename it into place via :meth:`Path.replace`. This matches
     :meth:`S6ServiceManager.register_profile_gateway` (PR #30136
@@ -302,6 +311,27 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
         # _dispatch_via_service_manager_if_s6 helper to `s6-svc -u`).
         if not start:
             (tmp_dir / "down").touch()
+            # Also mark the log/ sub-service down (issue #34480).
+            # s6 supervises the producer (gateway) and its logger as
+            # two independent longruns. A `down` marker on the parent
+            # service does NOT cascade to the `log/` pipeline child —
+            # s6-svscan brings the logger up on its own. So in a
+            # multi-container shared-volume stack, every container that
+            # does NOT own this profile still starts a `gateway-<p>/log`
+            # s6-log, which races for the same exclusive lock and then
+            # crash-loops under s6-supervise (sub-second restart storm,
+            # continuous log spam). The per-container log-dir nesting
+            # (issue #34457) gives each logger a distinct lock path so
+            # they no longer COLLIDE, but the loggers for un-owned
+            # profiles are still pointlessly running. This marker stops
+            # them at the source: when the gateway is intentionally
+            # down in this container, its logger stays down too. When
+            # the user brings the gateway up with
+            # `hermes -p <profile> gateway start`, s6 starts the
+            # producer, which in turn lets the (now un-downed at first
+            # real write) logger pipeline run — the standard s6
+            # producer/consumer relationship.
+            (log_subdir / "down").touch()
 
         # Pre-create the supervise/ skeleton with hermes ownership
         # BEFORE we publish the slot. Mirrors the same pre-creation

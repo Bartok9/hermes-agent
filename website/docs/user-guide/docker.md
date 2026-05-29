@@ -182,7 +182,7 @@ Each profile created with `hermes profile create <name>` gets:
 
 - A dedicated s6 service slot at `/run/service/gateway-<name>/`, registered dynamically by the runtime — no container rebuild required.
 - Auto-restart on crash, backoff-managed by `s6-supervise`.
-- Per-profile rotated logs at `${HERMES_HOME}/logs/gateways/<name>/current` (10 archives × 1 MB each).
+- Per-profile rotated logs at `${HERMES_HOME}/logs/gateways/<name>/<container-id>/current` (10 archives × 1 MB each). The `<container-id>` segment scopes each container's `s6-log` lock so multiple containers can share one data volume without colliding (see [Sharing a data volume across containers](#sharing-a-data-volume-across-containers)). Set `HERMES_GATEWAY_LOG_PER_CONTAINER=0` to use the legacy flat `…/gateways/<name>/current` path on single-container deployments.
 - State persistence across container restarts: the boot-time reconciler reads `gateway_state.json` from each profile directory and brings the slot back up only for profiles whose last recorded state was `running`. Only a gateway you explicitly stopped (`hermes gateway stop`) stays down across a restart — a container restart, image upgrade, or unexpected exit leaves the recorded state as `running`, so the gateway auto-starts on the next boot.
 
 The lifecycle commands you'd run on the host work the same way from inside the container:
@@ -269,7 +269,30 @@ The s6 container has four distinct log surfaces, and "why isn't my gateway showi
 
 Two practical consequences worth knowing:
 
-- The file copy at `logs/gateways/<profile>/current` is what survives container restarts. `docker logs` only retains output from the current container's lifetime (and is wiped on `docker rm`); the rotated files persist on the bind-mounted volume.
+- The file copy at `logs/gateways/<profile>/<container-id>/current` is what survives container restarts. `docker logs` only retains output from the current container's lifetime (and is wiped on `docker rm`); the rotated files persist on the bind-mounted volume. (On single-container deployments with `HERMES_GATEWAY_LOG_PER_CONTAINER=0` the path is the flat `logs/gateways/<profile>/current`.)
+
+### Sharing a data volume across containers
+
+Some deployments run the gateway and the dashboard as **separate containers** that bind-mount the **same** host data folder, so SQLite state, dynamic skills, and config stay in sync:
+
+```yaml
+services:
+  gateway:
+    image: nousresearch/hermes-agent
+    command: gateway run
+    volumes:
+      - /srv/hermes/data:/opt/data
+  dashboard:
+    image: nousresearch/hermes-agent
+    environment:
+      - HERMES_DASHBOARD=1
+    volumes:
+      - /srv/hermes/data:/opt/data
+```
+
+`s6-log` takes an **exclusive lock** on its log directory to guarantee a single writer. If both containers wrote their gateway logs to the same `logs/gateways/<profile>/` path, the second container's `s6-log` could not acquire the lock, would crash, and `s6-supervise` would restart it in an endless sub-second loop (hammering the host disk). To prevent this, each container nests its gateway logs under a per-container subdirectory (`logs/gateways/<profile>/<container-id>/current`) derived from `HERMES_CONTAINER_ID` (if set), else the container hostname. No configuration is required; it is on by default.
+
+If you intentionally run a **single** container and prefer the flat layout, set `HERMES_GATEWAY_LOG_PER_CONTAINER=0`.
 - The boot reconciler's audit line shape is `<iso-timestamp> profile=<name> prior_state=<state> action=<registered|started>`, so a quick `grep profile=coder ~/.hermes/logs/container-boot.log` reveals when a given profile was last restored and whether s6 auto-started it.
 
 ## Environment variable forwarding
