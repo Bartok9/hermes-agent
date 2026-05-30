@@ -490,11 +490,16 @@ hermes egress audit grep PATTERN --since 1h   # regex + time-window filter
 hermes egress audit stats --since 1h   # status distribution, top hosts/sandboxes, anomalies
 hermes egress audit export --format json|csv [--out PATH] [--since 1h]  # SIEM export
 
+hermes egress harden                   # host-hardening survey: firewall/SSH/fail2ban/mesh-VPN/seccomp + iron-proxy runtime
+hermes egress harden --baseline catalin   # evaluate against minimal|catalin|paranoid (default minimal)
+hermes egress harden --all             # show passing signals too (default: gaps only)
+hermes egress harden --json            # {signals[], baseline, satisfied, missing[]}; always exits 0
+
 hermes egress disable                  # flip proxy.enabled = false (does not stop a running proxy)
 hermes egress config                   # print the path to proxy.yaml for inspection
 ```
 
-`--since` accepts relative durations (`30m`/`2h`/`7d`/`1w`), `today`, or an ISO-8601 date/datetime. `doctor` exits `0` when no check fails (warns/skips tolerated) and `1` otherwise; `--check` names are: `binary`, `ca`, `config`, `mappings`, `daemon`, `listening`, `reachability`, `token-swap`, `uncovered`, `docker-dns`, `ssrf-deny`.
+`--since` accepts relative durations (`30m`/`2h`/`7d`/`1w`), `today`, or an ISO-8601 date/datetime. `doctor` exits `0` when no check fails (warns/skips tolerated) and `1` otherwise; `--check` names are: `binary`, `ca`, `config`, `mappings`, `daemon`, `listening`, `reachability`, `token-swap`, `uncovered`, `docker-dns`, `ssrf-deny`. `harden` is informational and always exits `0` (it never gates); its `--baseline` values are `minimal`, `catalin`, `paranoid`, and it surveys these signals: `tailscale`, `ufw`, `firewalld`, `nftables`, `fail2ban`, `ssh-password-auth`, `ssh-root-login`, `iron-proxy-enabled`, `iron-proxy-running`, `docker-seccomp`. See [Host hardening baselines](../user-guide/egress/hardening-baselines.md).
 
 ### Common flows
 

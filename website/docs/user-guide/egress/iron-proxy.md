@@ -736,6 +736,22 @@ When the pinned version moves to v0.40+ (which adds `log.audit_path`), per-reque
 - iron-proxy in-memory secret zeroisation is upstream-controlled. Same-uid attackers with `/proc/<pid>/mem` read access can read swapped-in secrets from the daemon's memory.
 - iron-proxy v0.39 only supports a **single bind per daemon** and combines daemon + per-request records into a single log stream. The integration is designed to upgrade cleanly: the moment upstream adds `proxy.http_listens` (plural) and `log.audit_path`, both wire in automatically without changing operator configs.
 
+## Host hardening
+
+The egress proxy isolates sandbox *credentials*, but it can't lock down the
+host it runs on — that's a separate, complementary layer. `hermes egress
+harden` is a read-only survey that probes the host's perimeter controls
+(Tailscale, UFW / firewalld / nftables, fail2ban, SSH config, Docker
+seccomp) alongside the two iron-proxy runtime signals, so you can see the
+whole defense-in-depth stack in one table. It's informational — always
+exits `0` — and never gates a deploy. See [Host hardening
+baselines](./hardening-baselines.md) for the `minimal` / `catalin` /
+`paranoid` targets and which threat each layer mitigates.
+
+```bash
+hermes egress harden --baseline catalin
+```
+
 ## See also
 
 - Upstream project: [github.com/ironsh/iron-proxy](https://github.com/ironsh/iron-proxy)
