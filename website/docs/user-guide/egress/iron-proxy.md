@@ -151,9 +151,32 @@ We also pin `metrics.listen: 127.0.0.1:0` so the daemon's built-in metrics serve
 
 If a hostile `ip` shim earlier on PATH had been able to inject a non-private IPv4 here (`0.0.0.0`, a public address, multicast, link-local, etc.) the loopback fallback still applies — we never bind anything we couldn't validate via `ipaddress.IPv4Address` + `is_*` checks.
 
+### Anthropic native
+
+Anthropic's native API (`api.anthropic.com`) authenticates with an `x-api-key: <key>` header instead of `Authorization: Bearer <key>`. By default the egress proxy only swaps the Bearer header, so a sandbox using the native Anthropic SDK would hold the real `ANTHROPIC_API_KEY`.
+
+Opt in with the `--with-anthropic` flag at setup time:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+hermes egress setup --with-anthropic
+hermes egress start
+```
+
+What this does:
+
+- Mints a proxy token + `TokenMapping` for `ANTHROPIC_API_KEY` scoped to `api.anthropic.com`.
+- Emits a second `secrets` rule with `match_headers: ["x-api-key"]` (the Bearer rule keeps `match_headers: ["Authorization"]`). The x-api-key rule does **not** match query params — Anthropic has no bearer-query form.
+- Drops `ANTHROPIC_API_KEY` from the uncovered/blocked sets, so `fail_on_uncovered_providers: true` no longer refuses to start on its account.
+- Persists `proxy.with_anthropic: true` in `config.yaml` so `hermes egress start` and `hermes egress doctor` know the key is covered.
+
+**Why it's opt-in (default off):** an `ANTHROPIC_API_KEY` in your env might be routed through OpenRouter (`openrouter.ai`, Bearer) rather than hitting `api.anthropic.com` directly. Auto-wiring an x-api-key swap to `api.anthropic.com` in that case would be a no-op at best and confusing at worst, so you must explicitly say you want the native path covered.
+
+The Docker backend injects `HERMES_PROXY_TOKEN_ANTHROPIC_API_KEY` into sandboxes the same way it does for Bearer providers — the `TokenMapping` data model is auth-header-agnostic.
+
 ## Uncovered providers
 
-iron-proxy's `secrets` transform only handles `Authorization: Bearer` headers. Providers using `x-api-key`, SigV4, AAD tokens, or custom signatures cannot be proxied — if their env vars are present, the sandbox holds **real credentials** for those providers and the egress isolation guarantee is incomplete for them.
+iron-proxy's `secrets` transform handles `Authorization: Bearer` headers, plus `x-api-key` for Anthropic native when you opt in (see [Anthropic native](#anthropic-native)). Other providers using SigV4, AAD tokens, or custom signatures cannot be proxied. If their env vars are present, the sandbox holds **real credentials** for those providers and the egress isolation guarantee is incomplete for them.
 
 The wizard and `hermes egress status` always surface uncovered providers in your env. There are two tiers:
 
@@ -161,11 +184,12 @@ The wizard and `hermes egress status` always surface uncovered providers in your
 
 | Env var | Provider | Reason |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Anthropic native | x-api-key header, not Bearer |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI | api-key header + optional AAD |
 | `GEMINI_API_KEY` | Google AI Studio (Gemini) | x-goog-api-key |
 
 These are LLM-specific names. An operator who has them set is using those providers; a bypass is a real isolation failure.
+
+> **Anthropic native is now supported** via `hermes egress setup --with-anthropic`. When you opt in, `ANTHROPIC_API_KEY` gets a real `x-api-key` swap rule and is no longer flagged as uncovered or blocked. See [Anthropic native](#anthropic-native) below. Without the flag, `ANTHROPIC_API_KEY` is still treated as warn-only (the key may be used via OpenRouter rather than `api.anthropic.com`).
 
 ### Warn-only tier — surfaced but never blocks
 
@@ -251,6 +275,18 @@ hermes egress setup --from-bitwarden   # use BWS as credential source (fail-loud
 hermes egress setup --no-bitwarden     # explicitly switch back to env mode
 hermes egress setup --rotate-tokens    # mint fresh tokens for every provider
                                        #   (default preserves existing)
+hermes egress setup --with-anthropic   # add an x-api-key swap rule for
+                                       #   ANTHROPIC_API_KEY (api.anthropic.com)
+
+hermes egress doctor                   # end-to-end health check (see below)
+hermes egress doctor --json            # machine-readable checks[] + summary{}
+hermes egress doctor --no-network      # skip reachability + token-swap probes
+hermes egress doctor --check ca --check binary   # run only named checks
+
+hermes egress audit tail [-n N] [-f]   # last N audit lines, optionally follow
+hermes egress audit grep PAT --since 1h  # regex + time-window filter
+hermes egress audit stats --since 1h   # status distribution + anomalies
+hermes egress audit export --format csv --out a.csv  # SIEM export
 
 hermes egress start                    # spawn the managed proxy daemon
 hermes egress stop                     # SIGTERM (then SIGKILL after 5s grace)
@@ -296,6 +332,141 @@ hermes egress stop && hermes egress start
 ```
 
 Containers already running hold the old tokens and will need to be restarted to pick up the new ones.
+
+## Health checks
+
+`hermes egress doctor` runs a battery of read-only checks against your egress setup and prints actionable fix-it hints — run it **before** deploying to confirm everything is wired, and **after** a problem to pinpoint what broke. It never starts, stops, or rewrites anything.
+
+The checks, in order:
+
+| Check | What it verifies |
+|---|---|
+| `binary` | iron-proxy installed, executable, version matches the pin |
+| `ca` | `ca.crt` present, valid PEM, not expired (warn < 365 days, fail < 30) |
+| `config` | `proxy.yaml` present and parses as YAML |
+| `mappings` | `mappings.json` present, parses, and every `real_env_name` is set (or BW-declared) |
+| `daemon` | pidfile present and the PID is a live iron-proxy process |
+| `listening` | something accepts on `127.0.0.1:<tunnel_port>` (reports bind addrs via `lsof`) |
+| `reachability` | a 1-shot HTTPS HEAD through the proxy to each allowlisted host returns 200/401/403/404 |
+| `token-swap` | a HEAD with the proxy token returns 401 (swap fired, reached upstream) and **not** 403 (proxy refused) |
+| `uncovered` | warns about provider env vars the proxy can't cover (Anthropic native excluded when `--with-anthropic` was used) |
+| `docker-dns` | if Docker is installed, `host.docker.internal` resolves inside a one-shot container |
+| `ssrf-deny` | the effective `upstream_deny_cidrs` still includes the IMDS range `169.254.0.0/16` |
+
+Flags:
+
+- `--json` — emit `{checks: [{name, status, detail, fix}], summary: {pass, warn, fail, skip}}`. Exit `0` if there are no failures (warns/skips are tolerated), `1` otherwise.
+- `--check <name>` — run only the named check (repeatable, scriptable).
+- `--no-network` — skip the `reachability` and `token-swap` probes (CI / hermetic environments).
+
+Failure-message credentials are redacted to the last 4 characters at most — a broken token-swap never echoes a real key.
+
+### Example: all healthy
+
+```text
+   Check         Detail
+ ✓ binary        ~/.hermes/bin/iron-proxy (iron-proxy v0.39.0)
+ ✓ ca            valid until 2035-06-01 (3287d)
+ ✓ config        valid YAML at ~/.hermes/proxy/proxy.yaml
+ ✓ mappings      3 mapping(s), all env present
+ ✓ daemon        running as pid 48213
+ ✓ listening     listening on 127.0.0.1:9090
+ ✓ reachability  all 9 allowlisted host(s) returned 200/401/403/404
+ ✓ token-swap    swap fired for OPENROUTER_API_KEY (upstream openrouter.ai returned 401)
+ ✓ uncovered     no uncovered provider env vars
+ ✓ docker-dns    host.docker.internal resolves inside containers
+ ✓ ssrf-deny     IMDS + loopback denied (11 CIDR(s) in deny list)
+
+Summary  11 pass  0 warn  0 fail  0 skip
+✓ egress proxy looks healthy.
+```
+
+### Example: a failure with a fix
+
+```text
+   Check         Detail
+ ✓ binary        ~/.hermes/bin/iron-proxy (iron-proxy v0.39.0)
+ ✗ daemon        no pidfile / daemon not running
+ ✗ listening     nothing accepting on 127.0.0.1:9090 (Connection refused)
+ ...
+
+Suggested fixes
+  daemon: start it with `hermes egress start`
+  listening: start the daemon (`hermes egress start`) or check the tunnel port
+
+Summary  6 pass  0 warn  2 fail  2 skip
+```
+
+### Example: a warning (CA rotation reminder)
+
+```text
+ ⚠ ca            CA expires in 142d (2026-10-19)
+
+Suggested fixes
+  ca: plan a CA rotation within the year
+```
+
+## Audit log
+
+`hermes egress audit` reads the structured audit stream at `~/.hermes/proxy/audit.log` (JSON Lines: `{ts, level, request_id, upstream_host, method, path, status, sandbox_id?, transform?}` per line). Lines that don't parse as JSON are still displayed/grepped on a best-effort basis.
+
+### `audit tail`
+
+```text
+$ hermes egress audit tail -n 3
+ ts                    method  upstream_host    path           status  sandbox_id
+ 2026-05-30T14:02:11Z  POST    api.openai.com   /v1/chat/...   200     sbx-91af
+ 2026-05-30T14:02:14Z  POST    openrouter.ai    /api/v1/chat   200     sbx-91af
+ 2026-05-30T14:02:19Z  GET     evil.test        /              403     sbx-3c20
+```
+
+Add `-f` to follow new lines (250ms polling loop, no extra dependency; handles log rotation). Add `--json` for raw JSON-Lines.
+
+### `audit grep`
+
+```text
+$ hermes egress audit grep '403' --since 1h
+ ts                    method  upstream_host  path  status  sandbox_id
+ 2026-05-30T14:02:19Z  GET     evil.test      /     403     sbx-3c20
+```
+
+`PATTERN` is a regex matched against the raw line. `--since` accepts `30m`/`2h`/`7d`/`1w`, `today`, or an ISO-8601 date/datetime. An unparseable `--since` exits non-zero with a clear message.
+
+### `audit stats`
+
+```text
+$ hermes egress audit stats --since 1h
+Audit stats  (412 events, 0 unparsed)
+ Status  Count
+ 200     389
+ 401     6
+ 403     17
+403 denied: 17
+
+Top upstream hosts
+ Host            Requests
+ api.openai.com  201
+ openrouter.ai   188
+ evil.test       17
+
+⚠ First-time upstream hosts in window (not seen in prior 24h):
+  - evil.test
+
+⚠ Hosts with >5% 403 rate (misconfig or probing):
+  - evil.test: 100%
+```
+
+Anomaly detection surfaces two signals: **first-time upstream hosts** (a host appearing in the window but not in the prior 24h — catches a quiet DNS-rebind to a newly-allowlisted host) and **hosts with a 403 rate above 5%** (likely misconfiguration or allowlist probing). `--json` emits `{stats, anomalies}`.
+
+### `audit export`
+
+```bash
+hermes egress audit export --format json            # to stdout (default)
+hermes egress audit export --format csv --out a.csv  # to a file
+hermes egress audit export --format json --since today
+```
+
+Bulk export for SIEM ingest. The synthetic parse fields (`_raw`, `_ts`) are stripped from the output; unparseable lines export as `{"raw": "..."}`.
 
 ## State directory layout
 

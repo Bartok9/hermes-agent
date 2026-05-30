@@ -472,6 +472,7 @@ hermes egress setup --tunnel-port N    # override the tunnel listener port (defa
 hermes egress setup --from-bitwarden   # use Bitwarden Secrets Manager as credential source
 hermes egress setup --no-bitwarden     # explicitly switch back to env-based credentials
 hermes egress setup --rotate-tokens    # mint fresh proxy tokens (default preserves existing)
+hermes egress setup --with-anthropic   # add an x-api-key swap rule for ANTHROPIC_API_KEY (api.anthropic.com)
 
 hermes egress start                    # spawn the managed proxy daemon
 hermes egress stop                     # SIGTERM (then SIGKILL after 5s grace)
@@ -479,9 +480,21 @@ hermes egress stop                     # SIGTERM (then SIGKILL after 5s grace)
 hermes egress status                   # binary + config + pid + listening + mappings
 hermes egress status --show-tokens     # print proxy tokens in full (default: redacted)
 
+hermes egress doctor                   # end-to-end health check (binary/CA/config/daemon/reachability/swap/SSRF)
+hermes egress doctor --json            # machine-readable {checks[], summary{}}; exit 1 on any fail
+hermes egress doctor --no-network      # skip reachability + token-swap probes (CI / hermetic)
+hermes egress doctor --check NAME      # run only the named check (repeatable)
+
+hermes egress audit tail [-n N] [-f]   # last N audit lines, -f follows (250ms poll)
+hermes egress audit grep PATTERN --since 1h   # regex + time-window filter
+hermes egress audit stats --since 1h   # status distribution, top hosts/sandboxes, anomalies
+hermes egress audit export --format json|csv [--out PATH] [--since 1h]  # SIEM export
+
 hermes egress disable                  # flip proxy.enabled = false (does not stop a running proxy)
 hermes egress config                   # print the path to proxy.yaml for inspection
 ```
+
+`--since` accepts relative durations (`30m`/`2h`/`7d`/`1w`), `today`, or an ISO-8601 date/datetime. `doctor` exits `0` when no check fails (warns/skips tolerated) and `1` otherwise; `--check` names are: `binary`, `ca`, `config`, `mappings`, `daemon`, `listening`, `reachability`, `token-swap`, `uncovered`, `docker-dns`, `ssrf-deny`.
 
 ### Common flows
 

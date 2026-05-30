@@ -83,6 +83,12 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
              "preserve tokens for providers that already had one — avoids "
              "401-ing already-running sandboxes on re-setup).",
     )
+    setup.add_argument(
+        "--with-anthropic", action="store_true",
+        help="Also proxy Anthropic native (api.anthropic.com) by minting an "
+             "x-api-key swap rule for ANTHROPIC_API_KEY.  Off by default "
+             "because the key may be used via OpenRouter instead.",
+    )
     setup.set_defaults(func=cmd_setup)
 
     start = sub.add_parser("start", help="Start the managed iron-proxy")
@@ -98,6 +104,67 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
              "Beware: tokens may persist in your shell history.",
     )
     status.set_defaults(func=cmd_status)
+
+    doctor = sub.add_parser(
+        "doctor",
+        help="End-to-end egress health check (binary, CA, config, daemon, "
+             "reachability, token-swap, SSRF guard, docker DNS).",
+    )
+    doctor.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="Emit a single JSON object with checks[] + summary{}.",
+    )
+    doctor.add_argument(
+        "--check", action="append", default=None, dest="only", metavar="NAME",
+        help=f"Run only the named check (repeatable).  One of: "
+             f"{', '.join(ip.DOCTOR_CHECK_NAMES)}",
+    )
+    doctor.add_argument(
+        "--no-network", action="store_true", dest="no_network",
+        help="Skip reachability + token-swap probes (CI / hermetic).",
+    )
+    doctor.set_defaults(func=cmd_doctor)
+
+    audit = sub.add_parser(
+        "audit",
+        help="View / search / aggregate the iron-proxy audit log.",
+    )
+    audit_sub = audit.add_subparsers(dest="audit_command")
+
+    a_tail = audit_sub.add_parser("tail", help="Show the last N audit lines.")
+    a_tail.add_argument("-n", type=int, default=50, dest="n",
+                        help="Number of lines (default 50).")
+    a_tail.add_argument("-f", "--follow", action="store_true", dest="follow",
+                        help="Follow the log (poll every 250ms).")
+    a_tail.add_argument("--json", action="store_true", dest="as_json",
+                        help="Emit JSON-Lines instead of a table.")
+    a_tail.set_defaults(func=cmd_audit_tail)
+
+    a_grep = audit_sub.add_parser("grep", help="Filter audit lines by regex.")
+    a_grep.add_argument("pattern", help="Regex matched against the raw line.")
+    a_grep.add_argument("--since", default=None,
+                        help="Time window: 30m/2h/7d/1w, 'today', or ISO date.")
+    a_grep.add_argument("--json", action="store_true", dest="as_json",
+                        help="Emit matching JSON-Lines.")
+    a_grep.set_defaults(func=cmd_audit_grep)
+
+    a_stats = audit_sub.add_parser("stats", help="Aggregate counts + anomalies.")
+    a_stats.add_argument("--since", default=None,
+                         help="Time window: 30m/2h/7d/1w, 'today', or ISO date.")
+    a_stats.add_argument("--json", action="store_true", dest="as_json",
+                         help="Emit the stats object as JSON.")
+    a_stats.set_defaults(func=cmd_audit_stats)
+
+    a_export = audit_sub.add_parser("export", help="Bulk export for SIEM.")
+    a_export.add_argument("--format", choices=("json", "csv"), default="json",
+                          dest="fmt", help="Output format (default json).")
+    a_export.add_argument("--out", default=None,
+                          help="Write to PATH instead of stdout.")
+    a_export.add_argument("--since", default=None,
+                          help="Time window: 30m/2h/7d/1w, 'today', or ISO date.")
+    a_export.set_defaults(func=cmd_audit_export)
+
+    audit.set_defaults(func=cmd_audit_default)
 
     disable = sub.add_parser("disable", help="Turn off the proxy integration")
     disable.set_defaults(func=cmd_disable)
@@ -218,9 +285,25 @@ def cmd_setup(args: argparse.Namespace) -> int:
             )
             return 1
 
+    with_anthropic = bool(getattr(args, "with_anthropic", False))
+
     discovered = ip.discover_provider_mappings(
         available_env_names=available_env_names or None,
     )
+    # Anthropic native (x-api-key) is opt-in via --with-anthropic.  When
+    # set, mint a dedicated x-api-key mapping so api.anthropic.com traffic
+    # is covered like the Bearer providers.
+    discovered += ip.discover_xapikey_mappings(
+        available_env_names=available_env_names or None,
+        with_anthropic=with_anthropic,
+    )
+    if with_anthropic and not any(
+        m.real_env_name == "ANTHROPIC_API_KEY" for m in discovered
+    ):
+        console.print(
+            "  [yellow]Note: --with-anthropic was passed but "
+            "ANTHROPIC_API_KEY is not set — no Anthropic rule added.[/yellow]"
+        )
 
     # Preserve tokens for providers we already had unless the operator
     # explicitly requested rotation.  This prevents re-running `hermes
@@ -297,7 +380,18 @@ def cmd_setup(args: argparse.Namespace) -> int:
     # work — they just bypass the egress isolation.
     uncovered = ip.discover_uncovered_providers(
         available_env_names=available_env_names or None,
+        with_anthropic=with_anthropic,
     )
+    if with_anthropic:
+        console.print(
+            "  [green]✓[/green] Anthropic native covered via x-api-key rule "
+            "(api.anthropic.com)"
+        )
+    else:
+        console.print(
+            "  [dim]Tip: Anthropic native (api.anthropic.com) is available "
+            "with [cyan]--with-anthropic[/cyan].[/dim]"
+        )
     if uncovered:
         console.print()
         console.print(
@@ -412,6 +506,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
     else:
         proxy_cfg["credential_source"] = "env"
     proxy_cfg.setdefault("fail_on_uncovered_providers", False)
+    # Persist the Anthropic opt-in so `hermes egress start`'s
+    # fail_on_uncovered_providers gate doesn't re-flag Anthropic as a
+    # blocker after the operator wired up the x-api-key rule at setup.
+    proxy_cfg["with_anthropic"] = with_anthropic
     save_config(cfg)
 
     console.print()
@@ -470,7 +568,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     # as warnings via `discover_uncovered_providers` but don't block, to
     # avoid tripping every operator with terraform / gcloud set up.
     if bool(proxy_cfg.get("fail_on_uncovered_providers", False)):
-        blocked = ip.discover_blocked_providers()
+        blocked = ip.discover_blocked_providers(
+            with_anthropic=bool(proxy_cfg.get("with_anthropic", False)),
+        )
         if blocked:
             console.print(
                 "[red]✗ Refusing to start: provider env vars present "
@@ -591,7 +691,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Surface uncovered providers so the operator knows the isolation
     # boundary is incomplete for those upstreams.
-    uncovered = ip.discover_uncovered_providers()
+    uncovered = ip.discover_uncovered_providers(
+        with_anthropic=bool(proxy_cfg.get("with_anthropic", False)),
+    )
     if uncovered:
         console.print()
         console.print(
@@ -601,6 +703,339 @@ def cmd_status(args: argparse.Namespace) -> int:
         for name in uncovered:
             console.print(f"  - {name}")
 
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    console = Console()
+    only = getattr(args, "only", None)
+    if only:
+        invalid = [c for c in only if c not in ip.DOCTOR_CHECK_NAMES]
+        if invalid:
+            console.print(
+                f"[red]✗ unknown check(s): {', '.join(invalid)}[/red]"
+            )
+            console.print(
+                f"  valid checks: {', '.join(ip.DOCTOR_CHECK_NAMES)}"
+            )
+            return 2
+
+    network = not bool(getattr(args, "no_network", False))
+    report = ip.run_doctor(network=network, only=only)
+
+    if getattr(args, "as_json", False):
+        import json as _json
+        # Plain stdout (not rich) so the JSON is machine-parseable.
+        print(_json.dumps(report.to_dict(), indent=2))
+        return 0 if report.ok else 1
+
+    _glyph = {
+        "pass": "[green]✓[/green]",
+        "warn": "[yellow]⚠[/yellow]",
+        "fail": "[red]✗[/red]",
+        "skip": "[dim]–[/dim]",
+    }
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
+    table.add_column("", width=2)
+    table.add_column("Check", style="cyan", no_wrap=True)
+    table.add_column("Detail")
+    for c in report.checks:
+        table.add_row(_glyph.get(c.status, "?"), c.name, c.detail)
+    console.print(table)
+
+    # Actionable fix-it block (brew-doctor style) for anything not passing.
+    actionable = [c for c in report.checks if c.fix and c.status in ("warn", "fail")]
+    if actionable:
+        console.print()
+        console.print("[bold]Suggested fixes[/bold]")
+        for c in actionable:
+            tone = "red" if c.status == "fail" else "yellow"
+            console.print(f"  [{tone}]{c.name}[/{tone}]: {c.fix}")
+
+    console.print()
+    console.print(
+        f"[bold]Summary[/bold]  "
+        f"[green]{report.n_pass} pass[/green]  "
+        f"[yellow]{report.n_warn} warn[/yellow]  "
+        f"[red]{report.n_fail} fail[/red]  "
+        f"[dim]{report.n_skip} skip[/dim]"
+    )
+    if report.ok:
+        console.print("[green]✓ egress proxy looks healthy.[/green]")
+    return 0 if report.ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Audit log handlers
+# ---------------------------------------------------------------------------
+
+
+_AUDIT_TABLE_FIELDS = ("ts", "method", "upstream_host", "path", "status",
+                       "sandbox_id")
+
+
+def _resolve_since(console: Console, spec):
+    """Parse --since, printing a clear error and returning the sentinel
+    ``False`` on failure (None means 'no window')."""
+    if spec is None:
+        return None
+    try:
+        return ip.parse_since(spec)
+    except ValueError as exc:
+        console.print(f"[red]✗ invalid --since: {exc}[/red]")
+        return False
+
+
+def _audit_row(ev: dict):
+    if ev.get("_unparsed"):
+        return None
+    return [str(ev.get(f, "")) for f in _AUDIT_TABLE_FIELDS]
+
+
+def _print_audit_table(console: Console, events):
+    table = Table(show_header=True, header_style="bold", box=None,
+                  padding=(0, 1))
+    for f in _AUDIT_TABLE_FIELDS:
+        table.add_column(f, overflow="fold")
+    any_row = False
+    for ev in events:
+        row = _audit_row(ev)
+        if row is None:
+            # Show unparsed lines dimmed in the first column.
+            table.add_row(f"[dim]{ev.get('_raw','')[:80]}[/dim]",
+                          *([""] * (len(_AUDIT_TABLE_FIELDS) - 1)))
+        else:
+            table.add_row(*row)
+        any_row = True
+    if any_row:
+        console.print(table)
+    else:
+        console.print("[dim](no audit events)[/dim]")
+
+
+def cmd_audit_default(args: argparse.Namespace) -> int:
+    # `hermes egress audit` with no subcommand -> show recent tail.
+    return cmd_audit_tail(_audit_args(n=50))
+
+
+def _audit_args(**overrides) -> argparse.Namespace:
+    ns = argparse.Namespace(
+        n=50, follow=False, as_json=False, since=None, pattern=None,
+        fmt="json", out=None,
+    )
+    for k, v in overrides.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def cmd_audit_tail(args: argparse.Namespace) -> int:
+    console = Console()
+    path = ip.audit_log_path()
+    n = max(1, int(getattr(args, "n", 50)))
+    as_json = bool(getattr(args, "as_json", False))
+
+    events = list(ip.iter_audit_log(path))
+    tail = events[-n:]
+
+    if as_json:
+        for ev in tail:
+            print(ev.get("_raw", ""))
+    else:
+        if not path.exists():
+            console.print(f"[dim](no audit log at {path})[/dim]")
+        else:
+            _print_audit_table(console, tail)
+
+    if not getattr(args, "follow", False):
+        return 0
+
+    # Follow mode: poll for new lines (no extra dependency).  Track byte
+    # offset so we only emit appended content.
+    import time
+    try:
+        offset = path.stat().st_size if path.exists() else 0
+    except OSError:
+        offset = 0
+    try:
+        while True:
+            time.sleep(0.25)
+            if not path.exists():
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size < offset:
+                # File truncated / rotated -- restart from the top.
+                offset = 0
+            if size > offset:
+                with path.open("r", encoding="utf-8", errors="replace") as fh:
+                    fh.seek(offset)
+                    chunk = fh.read()
+                    offset = fh.tell()
+                for line in chunk.splitlines():
+                    if not line.strip():
+                        continue
+                    if as_json:
+                        print(line)
+                    else:
+                        console.print(line)
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_audit_grep(args: argparse.Namespace) -> int:
+    import re
+    console = Console()
+    path = ip.audit_log_path()
+    since = _resolve_since(console, getattr(args, "since", None))
+    if since is False:
+        return 2
+    try:
+        rx = re.compile(args.pattern)
+    except re.error as exc:
+        console.print(f"[red]✗ invalid regex: {exc}[/red]")
+        return 2
+    as_json = bool(getattr(args, "as_json", False))
+
+    matched = []
+    for ev in ip.iter_audit_log(path):
+        if since is not None:
+            ts = ev.get("_ts")
+            if ts is None or ts < since:
+                continue
+        if rx.search(ev.get("_raw", "")):
+            matched.append(ev)
+
+    if as_json:
+        for ev in matched:
+            print(ev.get("_raw", ""))
+    else:
+        if not matched:
+            console.print("[dim](no matching audit events)[/dim]")
+        else:
+            _print_audit_table(console, matched)
+    return 0
+
+
+def cmd_audit_stats(args: argparse.Namespace) -> int:
+    console = Console()
+    path = ip.audit_log_path()
+    since = _resolve_since(console, getattr(args, "since", None))
+    if since is False:
+        return 2
+
+    events = list(ip.iter_audit_log(path))
+    stats = ip.aggregate_audit_stats(iter(events), since=since)
+    # Anomalies compare the in-window events against the prior 24h baseline.
+    if since is not None:
+        from datetime import timedelta
+        baseline_start = since - timedelta(hours=24)
+        window = [e for e in events
+                  if e.get("_ts") is not None and e.get("_ts") >= since]
+        baseline = [e for e in events
+                    if e.get("_ts") is not None
+                    and baseline_start <= e.get("_ts") < since]
+        anomalies = ip.detect_audit_anomalies(window, baseline=baseline)
+    else:
+        anomalies = ip.detect_audit_anomalies(events, baseline=None)
+
+    if bool(getattr(args, "as_json", False)):
+        import json as _json
+        print(_json.dumps({"stats": stats, "anomalies": anomalies}, indent=2))
+        return 0
+
+    console.print(f"[bold]Audit stats[/bold]  ({stats['total']} events, "
+                  f"{stats['unparsed']} unparsed)")
+    st = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    st.add_column("Status", style="cyan")
+    st.add_column("Count", justify="right")
+    for code, cnt in sorted(stats["by_status"].items(),
+                            key=lambda kv: str(kv[0])):
+        st.add_row(str(code), str(cnt))
+    console.print(st)
+    console.print(f"[red]403 denied:[/red] {stats['denied']}")
+
+    if stats["top_hosts"]:
+        console.print("\n[bold]Top upstream hosts[/bold]")
+        ht = Table(show_header=True, header_style="bold", box=None,
+                   padding=(0, 2))
+        ht.add_column("Host", style="cyan")
+        ht.add_column("Requests", justify="right")
+        for host, cnt in stats["top_hosts"]:
+            ht.add_row(str(host), str(cnt))
+        console.print(ht)
+
+    if stats["top_sandboxes"]:
+        console.print("\n[bold]Top sandboxes[/bold]")
+        for sid, cnt in stats["top_sandboxes"]:
+            console.print(f"  {sid}: {cnt}")
+
+    if anomalies["first_time_hosts"]:
+        console.print("\n[yellow]⚠ First-time upstream hosts in window[/yellow] "
+                      "(not seen in prior 24h):")
+        for h in anomalies["first_time_hosts"]:
+            console.print(f"  - {h}")
+    if anomalies["high_403_hosts"]:
+        console.print("\n[yellow]⚠ Hosts with >5% 403 rate[/yellow] "
+                      "(misconfig or probing):")
+        for h, rate in anomalies["high_403_hosts"]:
+            console.print(f"  - {h}: {rate:.0%}")
+    return 0
+
+
+def cmd_audit_export(args: argparse.Namespace) -> int:
+    console = Console()
+    path = ip.audit_log_path()
+    since = _resolve_since(console, getattr(args, "since", None))
+    if since is False:
+        return 2
+    fmt = getattr(args, "fmt", "json")
+    out_path = getattr(args, "out", None)
+
+    events = []
+    for ev in ip.iter_audit_log(path):
+        if since is not None:
+            ts = ev.get("_ts")
+            if ts is None or ts < since:
+                continue
+        # Strip the synthetic fields for a clean export.
+        clean = {k: v for k, v in ev.items()
+                 if k not in ("_raw", "_ts", "_unparsed")}
+        if not clean and ev.get("_unparsed"):
+            clean = {"raw": ev.get("_raw", "")}
+        events.append(clean)
+
+    if fmt == "json":
+        import json as _json
+        text = _json.dumps(events, indent=2)
+    else:  # csv
+        import csv
+        import io
+        cols = []
+        for ev in events:
+            for k in ev:
+                if k not in cols:
+                    cols.append(k)
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=cols or ["raw"],
+                                extrasaction="ignore")
+        writer.writeheader()
+        for ev in events:
+            writer.writerow(ev)
+        text = buf.getvalue()
+
+    if out_path:
+        try:
+            Path(out_path).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            console.print(f"[red]✗ could not write {out_path}: {exc}[/red]")
+            return 1
+        console.print(f"[green]✓[/green] exported {len(events)} event(s) "
+                      f"to {out_path}")
+    else:
+        # Plain stdout so the export is pipeable.
+        print(text)
     return 0
 
 

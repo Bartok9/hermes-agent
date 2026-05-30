@@ -45,6 +45,8 @@ def _args(**overrides):
         from_bitwarden=False,
         rotate_tokens=False,
         show_tokens=False,
+        with_anthropic=False,
+        no_bitwarden=False,
     )
     for k, v in overrides.items():
         setattr(ns, k, v)
@@ -425,3 +427,85 @@ def test_setup_has_rotate_tokens_flag():
     assert args.rotate_tokens is False
     args = parser.parse_args(["setup", "--rotate-tokens"])
     assert args.rotate_tokens is True
+
+
+# ---------------------------------------------------------------------------
+# cmd_doctor dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_doctor_json_exit_codes(hermes_home, monkeypatch, capsys):
+    """--json: exit 0 when no fail, 1 when any fail."""
+    import json as _json
+
+    ok = ip.DoctorReport(checks=[ip.DoctorCheck("binary", "pass", "ok")])
+    monkeypatch.setattr(ip, "run_doctor", lambda **kw: ok)
+    rc = proxy_cli.cmd_doctor(_args(as_json=True, only=None, no_network=True))
+    assert rc == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["summary"]["pass"] == 1
+
+    bad = ip.DoctorReport(checks=[ip.DoctorCheck("ca", "fail", "missing", "fix")])
+    monkeypatch.setattr(ip, "run_doctor", lambda **kw: bad)
+    rc = proxy_cli.cmd_doctor(_args(as_json=True, only=None, no_network=True))
+    assert rc == 1
+
+
+def test_cmd_doctor_rejects_unknown_check(hermes_home, capsys):
+    rc = proxy_cli.cmd_doctor(_args(as_json=False, only=["bogus"], no_network=True))
+    assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# cmd_setup --with-anthropic
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_setup_with_anthropic_wires_xapikey_rule(hermes_home, monkeypatch):
+    """--with-anthropic + ANTHROPIC_API_KEY set should persist
+    with_anthropic=True and add an x-api-key mapping."""
+    from hermes_cli.config import load_config
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
+    monkeypatch.setattr(ip, "find_iron_proxy", lambda **kw: hermes_home / "iron-proxy")
+    monkeypatch.setattr(ip, "iron_proxy_version", lambda b: "test")
+    monkeypatch.setattr(
+        ip, "ensure_ca_cert",
+        lambda **kw: (hermes_home / "ca.crt", hermes_home / "ca.key"),
+    )
+    monkeypatch.setattr(ip, "ensure_audit_log", lambda p: None)
+
+    rc = proxy_cli.cmd_setup(_args(with_anthropic=True))
+    assert rc == 0
+
+    cfg = load_config()
+    assert cfg["proxy"]["with_anthropic"] is True
+    mappings = ip.load_mappings()
+    anthropic = [m for m in mappings if m.real_env_name == "ANTHROPIC_API_KEY"]
+    assert len(anthropic) == 1
+    assert anthropic[0].auth_header == "x-api-key"
+    assert anthropic[0].upstream_hosts == ("api.anthropic.com",)
+
+
+def test_cmd_setup_default_no_anthropic_rule(hermes_home, monkeypatch):
+    """Default (no flag) leaves Anthropic uncovered even when the key is set."""
+    from hermes_cli.config import load_config
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
+    monkeypatch.setattr(ip, "find_iron_proxy", lambda **kw: hermes_home / "iron-proxy")
+    monkeypatch.setattr(ip, "iron_proxy_version", lambda b: "test")
+    monkeypatch.setattr(
+        ip, "ensure_ca_cert",
+        lambda **kw: (hermes_home / "ca.crt", hermes_home / "ca.key"),
+    )
+    monkeypatch.setattr(ip, "ensure_audit_log", lambda p: None)
+
+    rc = proxy_cli.cmd_setup(_args(with_anthropic=False))
+    assert rc == 0
+
+    cfg = load_config()
+    assert cfg["proxy"]["with_anthropic"] is False
+    mappings = ip.load_mappings()
+    assert not any(m.real_env_name == "ANTHROPIC_API_KEY" for m in mappings)

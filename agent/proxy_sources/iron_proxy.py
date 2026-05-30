@@ -69,6 +69,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -131,6 +132,24 @@ _BEARER_PROVIDERS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+# Providers whose API uses an ``x-api-key: <key>`` header instead of
+# ``Authorization: Bearer <key>``.  These get a dedicated secrets-transform
+# rule that matches the ``x-api-key`` header, but only when the operator
+# opts in at setup time (``hermes egress setup --with-anthropic``).  The
+# opt-in default is OFF because someone with ``ANTHROPIC_API_KEY`` set might
+# be routing Anthropic models through OpenRouter (Bearer on openrouter.ai)
+# rather than hitting ``api.anthropic.com`` natively — auto-wiring an
+# x-api-key swap there would be a no-op at best and confusing at worst.
+#
+# When opted in, the env var moves out of the "uncovered" warning set and
+# into a real proxy rule: ``discover_xapikey_mappings`` mints a token + a
+# ``TokenMapping`` for it, and ``build_proxy_config`` emits a parallel
+# secrets rule with ``match_headers: ["x-api-key"]``.
+_XAPIKEY_PROVIDERS: Dict[str, Tuple[str, ...]] = {
+    "ANTHROPIC_API_KEY": ("api.anthropic.com",),
+}
+
+
 # Providers whose env-var names we recognize but whose API uses a non-bearer
 # auth scheme (x-api-key, AAD/OAuth, SigV4, custom signatures).  When any of
 # these env vars are present at proxy-start time AND
@@ -138,6 +157,11 @@ _BEARER_PROVIDERS: Dict[str, Tuple[str, ...]] = {
 # ``start_proxy`` refuses to start.  Without this list the sandbox would
 # still hold real credentials for these providers and silently bypass the
 # proxy.
+#
+# NOTE: ``ANTHROPIC_API_KEY`` lives here as a *warn-only* entry for the
+# default flow (no ``--with-anthropic``).  When the operator opts in, the
+# uncovered/blocked checks take an ``with_anthropic`` flag that removes
+# Anthropic from the uncovered set because it then has a real proxy rule.
 #
 # The default is False because many of these env vars (AWS_*,
 # GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_API_KEY) are present on most
@@ -152,6 +176,7 @@ _BEARER_PROVIDERS: Dict[str, Tuple[str, ...]] = {
 # only flags their presence so the operator knows isolation is incomplete.
 _NON_BEARER_PROVIDERS: Tuple[str, ...] = (
     # Anthropic native uses x-api-key, not Authorization: Bearer.
+    # Covered by a real x-api-key rule when --with-anthropic is set.
     "ANTHROPIC_API_KEY",
     # Azure OpenAI: api-key header + optional AAD bearer.
     "AZURE_OPENAI_API_KEY",
@@ -293,6 +318,88 @@ class TokenMapping:
     proxy_token: str
     real_env_name: str
     upstream_hosts: Tuple[str, ...]
+    # Which request header carries the credential.  ``"Authorization"`` is
+    # the Bearer default (OpenAI/OpenRouter/Groq/...); ``"x-api-key"`` is
+    # Anthropic's native scheme.  iron-proxy matches the proxy_token in
+    # this header and swaps it for the real secret.  Kept as a field on
+    # the mapping (rather than a separate list) so a single mapping set
+    # can mix Bearer and x-api-key providers and ``build_proxy_config``
+    # stays a straight loop.
+    auth_header: str = "Authorization"
+
+
+# Doctor check statuses.  Kept as bare strings (not an enum) so the --json
+# output is trivially serializable and stable across versions.
+_DOCTOR_PASS = "pass"
+_DOCTOR_WARN = "warn"
+_DOCTOR_FAIL = "fail"
+_DOCTOR_SKIP = "skip"
+
+
+@dataclass
+class DoctorCheck:
+    """Result of a single ``hermes egress doctor`` check.
+
+    ``status`` is one of pass/warn/fail/skip.  ``detail`` is a one-line
+    human explanation.  ``fix`` is a one-line remediation hint, present
+    only on warn/fail (empty otherwise).
+    """
+
+    name: str
+    status: str
+    detail: str
+    fix: str = ""
+
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            "name": self.name,
+            "status": self.status,
+            "detail": self.detail,
+            "fix": self.fix,
+        }
+
+
+@dataclass
+class DoctorReport:
+    """Aggregate result of a doctor run.
+
+    Exit-code policy (mirrors ``brew doctor`` / ``kubectl``): pass+warn+skip
+    are non-fatal (exit 0); any fail makes the run fail (exit 1).
+    """
+
+    checks: List[DoctorCheck] = field(default_factory=list)
+
+    @property
+    def n_pass(self) -> int:
+        return sum(1 for c in self.checks if c.status == _DOCTOR_PASS)
+
+    @property
+    def n_warn(self) -> int:
+        return sum(1 for c in self.checks if c.status == _DOCTOR_WARN)
+
+    @property
+    def n_fail(self) -> int:
+        return sum(1 for c in self.checks if c.status == _DOCTOR_FAIL)
+
+    @property
+    def n_skip(self) -> int:
+        return sum(1 for c in self.checks if c.status == _DOCTOR_SKIP)
+
+    @property
+    def ok(self) -> bool:
+        """True iff no check failed (warns/skips are tolerated)."""
+        return self.n_fail == 0
+
+    def to_dict(self) -> Dict:
+        return {
+            "checks": [c.to_dict() for c in self.checks],
+            "summary": {
+                "pass": self.n_pass,
+                "warn": self.n_warn,
+                "fail": self.n_fail,
+                "skip": self.n_skip,
+            },
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -828,15 +935,22 @@ def build_proxy_config(
 
     secrets_rules = []
     for m in mappings:
+        # Bearer providers swap the token in the Authorization header and
+        # also accept it as a query param.  x-api-key providers (Anthropic
+        # native) carry the key only in the ``x-api-key`` header — there is
+        # no query-param form, so match_query stays False for those to
+        # avoid a spurious match on an unrelated ``?x-api-key=`` string in
+        # a URL the agent constructs.
+        is_xapikey = m.auth_header.lower() == "x-api-key"
         secrets_rules.append({
             "source": {"type": "env", "var": m.real_env_name},
             "replace": {
                 "proxy_value": m.proxy_token,
-                "match_headers": ["Authorization"],
+                "match_headers": [m.auth_header],
                 # The token is also accepted as a bearer query param in case
                 # the sandbox passes it that way.  Body matching is off — we
                 # don't want body inspection forced for every request.
-                "match_query": True,
+                "match_query": False if is_xapikey else True,
                 "match_body": False,
             },
             "rules": [{"host": h} for h in m.upstream_hosts],
@@ -1020,6 +1134,12 @@ def write_mappings(mappings: List[TokenMapping]) -> Path:
                 "proxy_token": m.proxy_token,
                 "env_name": m.real_env_name,
                 "upstream_hosts": list(m.upstream_hosts),
+                # Persist the auth header so the Docker backend and a
+                # later `status`/`doctor` invocation know whether this is
+                # a Bearer or x-api-key provider.  Older mappings.json
+                # files without this key load as "Authorization" (the
+                # historical default) — see load_mappings().
+                "auth_header": m.auth_header,
             }
             for m in mappings
         ],
@@ -1051,6 +1171,9 @@ def load_mappings() -> List[TokenMapping]:
                 proxy_token=item["proxy_token"],
                 real_env_name=item["env_name"],
                 upstream_hosts=tuple(item.get("upstream_hosts") or ()),
+                # Back-compat: mappings.json written before x-api-key
+                # support omits the field; default to Bearer.
+                auth_header=item.get("auth_header") or "Authorization",
             ))
         except (KeyError, TypeError):
             continue
@@ -1086,9 +1209,50 @@ def discover_provider_mappings(
     return mappings
 
 
+def discover_xapikey_mappings(
+    *,
+    available_env_names: Optional[List[str]] = None,
+    with_anthropic: bool = False,
+) -> List[TokenMapping]:
+    """Mint x-api-key TokenMappings for opted-in non-Bearer providers.
+
+    Currently this is Anthropic native (``ANTHROPIC_API_KEY`` ->
+    ``api.anthropic.com`` via the ``x-api-key`` header).  Gated behind
+    ``with_anthropic`` because the env var may be set for an OpenRouter
+    flow that never touches ``api.anthropic.com`` — see the
+    ``_XAPIKEY_PROVIDERS`` docstring.
+
+    Returns an empty list when ``with_anthropic`` is False so the default
+    flow is byte-for-byte unchanged.
+    """
+
+    if not with_anthropic:
+        return []
+
+    if available_env_names is not None:
+        names = set(available_env_names)
+    else:
+        names = {k for k, v in os.environ.items() if v}
+
+    mappings: List[TokenMapping] = []
+    for env_name, hosts in _XAPIKEY_PROVIDERS.items():
+        if env_name not in names:
+            continue
+        mappings.append(TokenMapping(
+            proxy_token=mint_proxy_token(
+                prefix=env_name.lower().replace("_api_key", "")
+            ),
+            real_env_name=env_name,
+            upstream_hosts=hosts,
+            auth_header="x-api-key",
+        ))
+    return mappings
+
+
 def discover_uncovered_providers(
     *,
     available_env_names: Optional[List[str]] = None,
+    with_anthropic: bool = False,
 ) -> List[str]:
     """Return env-var names for providers we recognize but can't proxy.
 
@@ -1096,6 +1260,10 @@ def discover_uncovered_providers(
     (api-key), etc.  When any of these are configured, the sandbox is
     holding real credentials that the proxy can't strip — the isolation
     guarantee is incomplete for those providers.
+
+    When ``with_anthropic`` is True, ``ANTHROPIC_API_KEY`` is dropped from
+    the result because it then has a real x-api-key proxy rule (see
+    :func:`discover_xapikey_mappings`) and is no longer uncovered.
 
     The wizard uses this to print a warning at setup time; ``start_proxy``
     can be configured to refuse to start when ``fail_on_uncovered_providers``
@@ -1108,12 +1276,14 @@ def discover_uncovered_providers(
     else:
         names = {k for k, v in os.environ.items() if v}
 
-    return [n for n in _NON_BEARER_PROVIDERS if n in names]
+    covered = set(_XAPIKEY_PROVIDERS) if with_anthropic else set()
+    return [n for n in _NON_BEARER_PROVIDERS if n in names and n not in covered]
 
 
 def discover_blocked_providers(
     *,
     available_env_names: Optional[List[str]] = None,
+    with_anthropic: bool = False,
 ) -> List[str]:
     """Return env-var names for non-bearer providers that BLOCK start.
 
@@ -1121,6 +1291,9 @@ def discover_blocked_providers(
     enough to refuse-start when ``proxy.fail_on_uncovered_providers`` is
     true.  Excludes generic cloud creds (AWS_*, GCP application-default)
     that are usually present for unrelated tooling.
+
+    When ``with_anthropic`` is True, ``ANTHROPIC_API_KEY`` is no longer
+    blocking because it has a real proxy rule.
     """
 
     if available_env_names is not None:
@@ -1128,7 +1301,11 @@ def discover_blocked_providers(
     else:
         names = {k for k, v in os.environ.items() if v}
 
-    return [n for n in _LLM_SPECIFIC_NON_BEARER_PROVIDERS if n in names]
+    covered = set(_XAPIKEY_PROVIDERS) if with_anthropic else set()
+    return [
+        n for n in _LLM_SPECIFIC_NON_BEARER_PROVIDERS
+        if n in names and n not in covered
+    ]
 
 
 def merge_mappings(
@@ -1971,6 +2148,770 @@ def _tail_log(path: Path, *, lines: int = 20) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Doctor: end-to-end health check
+# ---------------------------------------------------------------------------
+
+
+# Canonical doctor check names.  Exposed so `--check <name>` can validate
+# the operator's selection and so tests can reference them symbolically.
+DOCTOR_CHECK_NAMES: Tuple[str, ...] = (
+    "binary",
+    "ca",
+    "config",
+    "mappings",
+    "daemon",
+    "listening",
+    "reachability",
+    "token-swap",
+    "uncovered",
+    "docker-dns",
+    "ssrf-deny",
+)
+
+# Checks that hit the network -- skipped under --no-network / CI.
+_DOCTOR_NETWORK_CHECKS: Tuple[str, ...] = ("reachability", "token-swap")
+
+
+def _redact_secret(value: str) -> str:
+    """Redact a credential to its last 4 chars at most.
+
+    Used in doctor failure messages so a swap-failure detail never echoes
+    a real API key.  Short strings (< 8 chars) collapse entirely.
+    """
+    if not value:
+        return "(empty)"
+    if len(value) < 8:
+        return "****"
+    return "****" + value[-4:]
+
+
+def _ca_not_after(ca_crt: Path) -> Optional[datetime]:
+    """Return the CA cert's notAfter as an aware UTC datetime, or None.
+
+    Uses ``openssl x509 -enddate`` (already a hard dep for CA generation)
+    so we don't pull in ``cryptography`` just to read one field.
+    """
+    if shutil.which("openssl") is None:
+        return None
+    try:
+        res = subprocess.run(  # noqa: S603 -- openssl trusted PATH lookup
+            ["openssl", "x509", "-enddate", "-noout", "-in", str(ca_crt)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    # Output: ``notAfter=Jun  1 12:00:00 2035 GMT``
+    line = res.stdout.strip()
+    if "=" not in line:
+        return None
+    raw = line.split("=", 1)[1].strip()
+    for fmt in ("%b %d %H:%M:%S %Y %Z", "%b %d %H:%M:%S %Y"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _is_pem(data: bytes) -> bool:
+    return b"-----BEGIN" in data and b"-----END" in data
+
+
+def _https_head_via_proxy(
+    host: str, *, proxy_port: int, timeout: float = 5.0,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[int], Optional[str]]:
+    """Do an HTTPS HEAD to ``host`` through the local proxy.
+
+    Returns ``(status_code, error)``.  On success ``error`` is None; on
+    failure ``status_code`` is None and ``error`` is a short string.
+
+    The proxy is an HTTP proxy that also serves CONNECT for HTTPS, so we
+    point urllib's ProxyHandler at it.  We don't verify the upstream TLS
+    chain here (the proxy re-signs with our CA which this host process may
+    not trust) -- we only care *that we reached the upstream and got an
+    HTTP status back*, which is what every doctor reachability/swap check
+    asserts on.  ssl._create_unverified_context is intentional and scoped
+    to this probe only.
+    """
+    import ssl
+    import urllib.request
+
+    proxy_url = f"http://127.0.0.1:{proxy_port}"
+    handler = urllib.request.ProxyHandler({"https": proxy_url, "http": proxy_url})
+    ctx = ssl._create_unverified_context()  # noqa: S323 -- see docstring
+    https_handler = urllib.request.HTTPSHandler(context=ctx)
+    opener = urllib.request.build_opener(handler, https_handler)
+    req = urllib.request.Request(f"https://{host}/", method="HEAD")
+    if extra_headers:
+        for k, v in extra_headers.items():
+            req.add_header(k, v)
+    try:
+        resp = opener.open(req, timeout=timeout)
+        return resp.status, None
+    except urllib.error.HTTPError as exc:
+        # An HTTP error response means we *reached* the upstream -- that's a
+        # successful round-trip for reachability/swap purposes.
+        return exc.code, None
+    except urllib.error.URLError as exc:
+        return None, str(exc.reason)
+    except (OSError, ssl.SSLError) as exc:
+        return None, str(exc)
+    except Exception as exc:  # noqa: BLE001 -- probe must never raise
+        return None, str(exc)
+
+
+def _check_binary(home_bin: Path) -> DoctorCheck:
+    name = "binary"
+    binary = home_bin / _platform_binary_name()
+    if not binary.exists():
+        # Fall back to PATH copy.
+        sys_bin = shutil.which("iron-proxy")
+        if sys_bin:
+            ver = iron_proxy_version(Path(sys_bin)) or "(unknown)"
+            status = _DOCTOR_PASS if _IRON_PROXY_VERSION in ver else _DOCTOR_WARN
+            fix = "" if status == _DOCTOR_PASS else (
+                f"PATH iron-proxy is {ver}, pinned is v{_IRON_PROXY_VERSION}; "
+                "run `hermes egress install --force`."
+            )
+            return DoctorCheck(name, status,
+                               f"using PATH binary {sys_bin} ({ver})", fix)
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"iron-proxy not found at {binary} or on PATH",
+            "run `hermes egress install`",
+        )
+    if not os.access(binary, os.X_OK):
+        return DoctorCheck(
+            name, _DOCTOR_FAIL, f"{binary} is not executable",
+            f"chmod +x {binary}",
+        )
+    ver = iron_proxy_version(binary) or "(unknown)"
+    if _IRON_PROXY_VERSION not in ver:
+        return DoctorCheck(
+            name, _DOCTOR_WARN,
+            f"installed {ver}, pinned v{_IRON_PROXY_VERSION}",
+            "run `hermes egress install --force` to match the pinned version",
+        )
+    return DoctorCheck(name, _DOCTOR_PASS, f"{binary} ({ver})")
+
+
+def _check_ca(ca_crt: Path) -> DoctorCheck:
+    name = "ca"
+    if not ca_crt.exists():
+        return DoctorCheck(
+            name, _DOCTOR_FAIL, f"CA cert missing at {ca_crt}",
+            "run `hermes egress setup` to generate the CA",
+        )
+    try:
+        data = ca_crt.read_bytes()
+    except OSError as exc:
+        return DoctorCheck(name, _DOCTOR_FAIL, f"cannot read {ca_crt}: {exc}",
+                           "check file permissions on the proxy state dir")
+    if not _is_pem(data):
+        return DoctorCheck(
+            name, _DOCTOR_FAIL, f"{ca_crt} is not valid PEM",
+            "regenerate with `hermes egress setup` (back up the old CA first)",
+        )
+    not_after = _ca_not_after(ca_crt)
+    if not_after is None:
+        return DoctorCheck(
+            name, _DOCTOR_WARN, "CA present but expiry could not be parsed",
+            "verify openssl is installed and the cert is well-formed",
+        )
+    now = datetime.now(timezone.utc)
+    if not_after <= now:
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"CA expired {not_after.date().isoformat()}",
+            "regenerate with `hermes egress setup` and re-distribute to sandboxes",
+        )
+    days = (not_after - now).days
+    if days < 30:
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"CA expires in {days}d ({not_after.date().isoformat()})",
+            "rotate the CA soon: `hermes egress setup` regenerates it",
+        )
+    if days < 365:
+        return DoctorCheck(
+            name, _DOCTOR_WARN,
+            f"CA expires in {days}d ({not_after.date().isoformat()})",
+            "plan a CA rotation within the year",
+        )
+    return DoctorCheck(name, _DOCTOR_PASS,
+                       f"valid until {not_after.date().isoformat()} ({days}d)")
+
+
+def _load_proxy_yaml(cfg_path: Path):
+    try:
+        import yaml
+    except ImportError:
+        return None, "PyYAML not installed"
+    try:
+        return yaml.safe_load(cfg_path.read_text(encoding="utf-8")), None
+    except OSError as exc:
+        return None, str(exc)
+    except Exception as exc:  # noqa: BLE001 -- yaml.YAMLError variants
+        return None, str(exc)
+
+
+def _check_config(cfg_path: Path) -> DoctorCheck:
+    name = "config"
+    if not cfg_path.exists():
+        return DoctorCheck(
+            name, _DOCTOR_FAIL, f"proxy.yaml missing at {cfg_path}",
+            "run `hermes egress setup`",
+        )
+    data, err = _load_proxy_yaml(cfg_path)
+    if err is not None or not isinstance(data, dict):
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"proxy.yaml failed to parse: {err or 'not a mapping'}",
+            "regenerate with `hermes egress setup`",
+        )
+    return DoctorCheck(name, _DOCTOR_PASS, f"valid YAML at {cfg_path}")
+
+
+def _check_mappings(state: Path, *, env_names: set) -> DoctorCheck:
+    name = "mappings"
+    mfile = state / "mappings.json"
+    if not mfile.exists():
+        return DoctorCheck(
+            name, _DOCTOR_FAIL, f"mappings.json missing at {mfile}",
+            "run `hermes egress setup`",
+        )
+    try:
+        payload = json.loads(mfile.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return DoctorCheck(
+            name, _DOCTOR_FAIL, f"mappings.json failed to parse: {exc}",
+            "regenerate with `hermes egress setup`",
+        )
+    tokens = payload.get("tokens") or []
+    if not tokens:
+        return DoctorCheck(
+            name, _DOCTOR_WARN, "mappings.json has no token mappings",
+            "set a provider API key and run `hermes egress setup`",
+        )
+    missing = [
+        t.get("env_name") for t in tokens
+        if t.get("env_name") and t.get("env_name") not in env_names
+    ]
+    if missing:
+        return DoctorCheck(
+            name, _DOCTOR_WARN,
+            f"{len(tokens)} mapping(s); env not set for: {', '.join(missing)}",
+            "export the missing keys, or set credential_source=bitwarden",
+        )
+    return DoctorCheck(name, _DOCTOR_PASS,
+                       f"{len(tokens)} mapping(s), all env present")
+
+
+def _check_daemon() -> DoctorCheck:
+    name = "daemon"
+    pid = _read_pid()
+    if pid is None:
+        return DoctorCheck(
+            name, _DOCTOR_FAIL, "no pidfile / daemon not running",
+            "start it with `hermes egress start`",
+        )
+    if not _pid_alive(pid):
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"pidfile points at pid {pid}, which is not alive",
+            "stale pidfile -- run `hermes egress start` (it cleans up)",
+        )
+    return DoctorCheck(name, _DOCTOR_PASS, f"running as pid {pid}")
+
+
+def _check_listening(port: int) -> DoctorCheck:
+    name = "listening"
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2):
+            pass
+    except OSError as exc:
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"nothing accepting on 127.0.0.1:{port} ({exc})",
+            "start the daemon (`hermes egress start`) or check the tunnel port",
+        )
+    bind_detail = f"127.0.0.1:{port} accepting"
+    lsof = shutil.which("lsof")
+    if lsof:
+        try:
+            res = subprocess.run(  # noqa: S603
+                [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                capture_output=True, text=True, timeout=3,
+            )
+            binds = [
+                ln.split()[8] for ln in res.stdout.splitlines()[1:]
+                if len(ln.split()) > 8
+            ]
+            if binds:
+                bind_detail = f"listening on {', '.join(sorted(set(binds)))}"
+        except (OSError, subprocess.TimeoutExpired, IndexError):
+            pass
+    return DoctorCheck(name, _DOCTOR_PASS, bind_detail)
+
+
+def _allowlisted_hosts_from_cfg(cfg_path: Path) -> List[str]:
+    data, err = _load_proxy_yaml(cfg_path)
+    if err is not None or not isinstance(data, dict):
+        return []
+    for t in (data.get("transforms") or []):
+        if t.get("name") == "allowlist":
+            domains = (t.get("config") or {}).get("domains") or []
+            # Skip wildcard entries -- we can't HEAD ``*.openrouter.ai``.
+            return [d for d in domains if isinstance(d, str) and "*" not in d]
+    return []
+
+
+def _check_reachability(cfg_path: Path, port: int) -> DoctorCheck:
+    name = "reachability"
+    import concurrent.futures
+    hosts = _allowlisted_hosts_from_cfg(cfg_path)
+    if not hosts:
+        return DoctorCheck(
+            name, _DOCTOR_WARN, "no concrete (non-wildcard) allowlisted hosts",
+            "add a provider mapping with `hermes egress setup`",
+        )
+    failures: List[str] = []
+
+    def _probe(h: str) -> Tuple[str, Optional[int], Optional[str]]:
+        code, err = _https_head_via_proxy(h, proxy_port=port, timeout=5.0)
+        return h, code, err
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        for h, code, err in ex.map(_probe, hosts):
+            if code is None or code not in (200, 401, 403, 404):
+                failures.append(f"{h} ({err or code})")
+    if failures:
+        more = " ..." if len(failures) > 3 else ""
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"{len(failures)}/{len(hosts)} hosts unreachable: "
+            f"{', '.join(failures[:3])}{more}",
+            "check the proxy is running, the allowlist is correct, and "
+            "upstream DNS resolves",
+        )
+    return DoctorCheck(
+        name, _DOCTOR_PASS,
+        f"all {len(hosts)} allowlisted host(s) returned 200/401/403/404",
+    )
+
+
+def _check_token_swap(state: Path, port: int) -> DoctorCheck:
+    name = "token-swap"
+    mappings = load_mappings()
+    bearer = [m for m in mappings if m.auth_header.lower() == "authorization"]
+    if not bearer:
+        return DoctorCheck(name, _DOCTOR_SKIP,
+                           "no Bearer provider mapping to test")
+    m = bearer[0]
+    host = next((h for h in m.upstream_hosts if "*" not in h), None)
+    if host is None:
+        return DoctorCheck(name, _DOCTOR_SKIP,
+                           f"{m.real_env_name} has only wildcard hosts")
+    code, err = _https_head_via_proxy(
+        host, proxy_port=port, timeout=5.0,
+        extra_headers={"Authorization": f"Bearer {m.proxy_token}"},
+    )
+    if code is None:
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"swap probe to {host} failed to connect ({err})",
+            "ensure the daemon is running and the host is allowlisted",
+        )
+    if code == 403:
+        # 403 = the proxy refused (swap rule didn't fire / wrong host match).
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            f"proxy returned 403 for {m.real_env_name} on {host} -- swap rule "
+            f"did not fire (token {_redact_secret(m.proxy_token)})",
+            "re-run `hermes egress setup` to regenerate the secrets rule",
+        )
+    # 401 (or 200/404) means we got PAST the proxy to the upstream -- the
+    # swap happened (the proxy token was rewritten to the real key, which
+    # the upstream then evaluated).  401 is the expected result for a HEAD
+    # with a possibly-stale-but-rewritten key.
+    if code in (200, 401, 404):
+        return DoctorCheck(
+            name, _DOCTOR_PASS,
+            f"swap fired for {m.real_env_name} (upstream {host} returned {code})",
+        )
+    return DoctorCheck(
+        name, _DOCTOR_WARN,
+        f"unexpected status {code} from {host} after swap",
+        "inspect the audit log: `hermes egress audit tail`",
+    )
+
+
+def _check_uncovered(*, with_anthropic: bool) -> DoctorCheck:
+    name = "uncovered"
+    uncovered = discover_uncovered_providers(with_anthropic=with_anthropic)
+    if not uncovered:
+        return DoctorCheck(name, _DOCTOR_PASS, "no uncovered provider env vars")
+    return DoctorCheck(
+        name, _DOCTOR_WARN,
+        f"uncovered providers hold real creds in-sandbox: {', '.join(uncovered)}",
+        "these use non-bearer auth; Anthropic native is covered with "
+        "`hermes egress setup --with-anthropic`",
+    )
+
+
+def _check_docker_dns() -> DoctorCheck:
+    name = "docker-dns"
+    if shutil.which("docker") is None:
+        return DoctorCheck(name, _DOCTOR_SKIP, "docker not installed")
+    try:
+        res = subprocess.run(  # noqa: S603
+            [
+                "docker", "run", "--rm",
+                "--add-host=host.docker.internal:host-gateway",
+                "alpine", "getent", "hosts", "host.docker.internal",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return DoctorCheck(
+            name, _DOCTOR_WARN, f"docker probe failed to run: {exc}",
+            "verify the docker daemon is up",
+        )
+    if res.returncode == 0 and res.stdout.strip():
+        return DoctorCheck(
+            name, _DOCTOR_PASS,
+            "host.docker.internal resolves inside containers",
+        )
+    return DoctorCheck(
+        name, _DOCTOR_FAIL,
+        "host.docker.internal does not resolve in a one-shot container",
+        "on Linux, ensure --add-host=host.docker.internal:host-gateway is "
+        "set for sandboxes (Hermes sets this automatically)",
+    )
+
+
+def _check_ssrf_deny(cfg_path: Path) -> DoctorCheck:
+    name = "ssrf-deny"
+    data, err = _load_proxy_yaml(cfg_path)
+    if err is not None or not isinstance(data, dict):
+        return DoctorCheck(
+            name, _DOCTOR_FAIL, f"could not read proxy.yaml: {err}",
+            "regenerate with `hermes egress setup`",
+        )
+    deny = ((data.get("proxy") or {}).get("upstream_deny_cidrs")) or []
+    if "169.254.0.0/16" not in deny:
+        return DoctorCheck(
+            name, _DOCTOR_FAIL,
+            "IMDS range 169.254.0.0/16 missing from upstream_deny_cidrs",
+            "re-run `hermes egress setup` -- someone edited proxy.yaml and "
+            "removed the cloud-metadata SSRF guard",
+        )
+    return DoctorCheck(
+        name, _DOCTOR_PASS,
+        f"IMDS + loopback denied ({len(deny)} CIDR(s) in deny list)",
+    )
+
+
+def run_doctor(
+    *, network: bool = True, only: Optional[List[str]] = None,
+) -> DoctorReport:
+    """Run the end-to-end egress health check.
+
+    ``network=False`` skips the reachability + token-swap probes (CI /
+    hermetic).  ``only`` restricts to the named checks (validated against
+    :data:`DOCTOR_CHECK_NAMES`).
+
+    Pure-ish: only side effect is read-only filesystem + (optionally)
+    outbound HEAD probes.  Never starts, stops, or rewrites anything.
+    """
+
+    if platform.system() == "Windows":
+        return DoctorReport(checks=[DoctorCheck(
+            "binary", _DOCTOR_FAIL,
+            "iron-proxy is not supported on Windows",
+            "run the proxy on a Linux/macOS host or inside WSL",
+        )])
+
+    selected = set(only) if only else set(DOCTOR_CHECK_NAMES)
+    state = _proxy_state_dir_ro()
+    cfg_path = state / "proxy.yaml"
+    ca_crt = state / "ca.crt"
+    port = _read_tunnel_port_from_config() or _DEFAULT_TUNNEL_PORT
+    env_names = {k for k, v in os.environ.items() if v}
+
+    # Read the persisted Anthropic opt-in from config if available.
+    with_anthropic = False
+    try:
+        from hermes_cli.config import load_config
+        with_anthropic = bool(
+            (load_config().get("proxy") or {}).get("with_anthropic", False)
+        )
+    except Exception:  # noqa: BLE001 -- config read is best-effort
+        pass
+
+    report = DoctorReport()
+
+    def _maybe(check_name: str, fn) -> None:
+        if check_name not in selected:
+            return
+        if check_name in _DOCTOR_NETWORK_CHECKS and not network:
+            report.checks.append(DoctorCheck(
+                check_name, _DOCTOR_SKIP, "skipped (--no-network)",
+            ))
+            return
+        report.checks.append(fn())
+
+    _maybe("binary", lambda: _check_binary(_hermes_bin_dir()))
+    _maybe("ca", lambda: _check_ca(ca_crt))
+    _maybe("config", lambda: _check_config(cfg_path))
+    _maybe("mappings", lambda: _check_mappings(state, env_names=env_names))
+    _maybe("daemon", _check_daemon)
+    _maybe("listening", lambda: _check_listening(port))
+    _maybe("reachability", lambda: _check_reachability(cfg_path, port))
+    _maybe("token-swap", lambda: _check_token_swap(state, port))
+    _maybe("uncovered", lambda: _check_uncovered(with_anthropic=with_anthropic))
+    _maybe("docker-dns", _check_docker_dns)
+    _maybe("ssrf-deny", lambda: _check_ssrf_deny(cfg_path))
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Audit log: structured viewer + stats + anomaly detection
+# ---------------------------------------------------------------------------
+
+
+def audit_log_path() -> Path:
+    """Path to the iron-proxy audit log (``<hermes_home>/proxy/audit.log``)."""
+    return _proxy_state_dir_ro() / "audit.log"
+
+
+def parse_since(spec: str, *, now: Optional[datetime] = None) -> datetime:
+    """Parse a ``--since`` spec into an aware UTC datetime lower-bound.
+
+    Accepts:
+      * relative durations: ``30m`` ``2h`` ``7d`` ``1w``
+      * ``today`` (midnight UTC today)
+      * an ISO-8601 date (``2026-05-30``) or datetime (``2026-05-30T12:00``)
+
+    Raises ``ValueError`` on anything unparseable so the CLI can exit
+    non-zero with a clear message.  Stdlib only (``datetime.fromisoformat``)
+    -- no dateutil dependency.
+    """
+    now = now or datetime.now(timezone.utc)
+    s = (spec or "").strip().lower()
+    if not s:
+        raise ValueError("empty --since value")
+    if s == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Relative duration: <number><unit>
+    units = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
+    if len(s) >= 2 and s[-1] in units and s[:-1].isdigit():
+        amount = int(s[:-1])
+        return now - timedelta(**{units[s[-1]]: amount})
+    # ISO date / datetime.  fromisoformat doesn't accept a trailing 'Z'
+    # before 3.11 in all forms, so normalize it.
+    iso = spec.strip()
+    if iso.endswith("Z"):
+        iso = iso[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError as exc:
+        raise ValueError(
+            f"unrecognized --since value {spec!r}: use 30m/2h/7d/1w, "
+            f"'today', or an ISO-8601 date/datetime"
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _parse_audit_ts(raw) -> Optional[datetime]:
+    """Best-effort parse of an audit-event timestamp to aware UTC."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def iter_audit_log(path: Path):
+    """Yield parsed audit events from a JSON-Lines audit log.
+
+    Each yielded item is a dict.  Well-formed JSON-Lines records are
+    yielded as-is with a derived ``_ts`` (aware datetime or None) and
+    ``_raw`` (the original line) added.  Lines that don't parse as JSON
+    are yielded as ``{"_raw": <line>, "_ts": None, "_unparsed": True}`` so
+    callers can still display/grep them ("best-effort parse" per the
+    upstream-format-may-differ note).
+
+    Pure generator -- no side effects beyond reading the file.  Missing
+    file yields nothing.
+    """
+    if not path.exists():
+        return
+    try:
+        fh = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    with fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            try:
+                ev = json.loads(line)
+                if not isinstance(ev, dict):
+                    raise ValueError("not an object")
+                ev["_raw"] = line
+                ev["_ts"] = _parse_audit_ts(ev.get("ts"))
+                yield ev
+            except (json.JSONDecodeError, ValueError):
+                yield {"_raw": line, "_ts": None, "_unparsed": True}
+
+
+def _filter_since(events, since: Optional[datetime]):
+    """Yield events at or after ``since``.  Events with no parseable ts
+    are KEPT when since is None, and DROPPED when a since filter is active
+    (we can't prove they're in-window)."""
+    for ev in events:
+        if since is None:
+            yield ev
+            continue
+        ts = ev.get("_ts")
+        if ts is not None and ts >= since:
+            yield ev
+
+
+def aggregate_audit_stats(events, *, since: Optional[datetime] = None) -> Dict:
+    """Aggregate a stream of audit events into summary counts.
+
+    Returns a dict with:
+      * ``total``            -- events counted (post-since-filter)
+      * ``unparsed``         -- count of non-JSON lines
+      * ``by_status``        -- {status_code: count}
+      * ``top_hosts``        -- [(host, count)] top 10 by frequency
+      * ``top_sandboxes``    -- [(sandbox_id, count)] top 10 (if present)
+      * ``denied``           -- count of 403 responses
+      * ``denied_rate_by_host`` -- {host: fraction_403} for hosts with traffic
+
+    Pure function over an iterable -- easy to test against a fixture list.
+    """
+    from collections import Counter
+
+    by_status: "Counter" = Counter()
+    host_counts: "Counter" = Counter()
+    sandbox_counts: "Counter" = Counter()
+    host_403: "Counter" = Counter()
+    total = 0
+    unparsed = 0
+    denied = 0
+
+    for ev in _filter_since(events, since):
+        total += 1
+        if ev.get("_unparsed"):
+            unparsed += 1
+            continue
+        status = ev.get("status")
+        if status is not None:
+            by_status[status] += 1
+            if status == 403:
+                denied += 1
+        host = ev.get("upstream_host")
+        if host:
+            host_counts[host] += 1
+            if status == 403:
+                host_403[host] += 1
+        sid = ev.get("sandbox_id")
+        if sid:
+            sandbox_counts[sid] += 1
+
+    denied_rate = {
+        h: round(host_403[h] / host_counts[h], 4)
+        for h in host_counts if host_counts[h] > 0 and host_403[h] > 0
+    }
+
+    return {
+        "total": total,
+        "unparsed": unparsed,
+        "by_status": dict(by_status),
+        "top_hosts": host_counts.most_common(10),
+        "top_sandboxes": sandbox_counts.most_common(10),
+        "denied": denied,
+        "denied_rate_by_host": denied_rate,
+    }
+
+
+def detect_audit_anomalies(events, *, baseline=None) -> Dict:
+    """Flag anomalies in a window of audit events vs. a baseline window.
+
+    * ``first_time_hosts`` -- upstream hosts present in ``events`` but NOT
+      in ``baseline`` (a host appearing for the first time vs. the prior
+      window -- catches DNS-rebind / newly-allowlisted-host exfil).
+    * ``high_403_hosts``   -- [(host, rate)] where the 403 rate exceeds 5%
+      (likely misconfiguration or an attack probing the allowlist).
+
+    ``baseline`` is an optional iterable of events representing the prior
+    period; when None, ``first_time_hosts`` lists every host seen (since
+    there's nothing to compare against).  Pure function.
+    """
+    cur_hosts = set()
+    host_total = {}
+    host_403 = {}
+    for ev in events:
+        if ev.get("_unparsed"):
+            continue
+        host = ev.get("upstream_host")
+        if not host:
+            continue
+        cur_hosts.add(host)
+        host_total[host] = host_total.get(host, 0) + 1
+        if ev.get("status") == 403:
+            host_403[host] = host_403.get(host, 0) + 1
+
+    if baseline is None:
+        base_hosts = set()
+    else:
+        base_hosts = {
+            ev.get("upstream_host") for ev in baseline
+            if not ev.get("_unparsed") and ev.get("upstream_host")
+        }
+
+    first_time = sorted(cur_hosts - base_hosts)
+    high_403 = sorted(
+        (
+            (h, round(host_403.get(h, 0) / host_total[h], 4))
+            for h in host_total
+            if host_total[h] > 0 and (host_403.get(h, 0) / host_total[h]) > 0.05
+        ),
+        key=lambda t: t[1], reverse=True,
+    )
+    return {
+        "first_time_hosts": first_time,
+        "high_403_hosts": high_403,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Test hook
 # ---------------------------------------------------------------------------
 
@@ -1999,8 +2940,18 @@ def _reset_for_tests() -> None:
 __all__ = [
     "ProxyStatus",
     "TokenMapping",
+    "DoctorCheck",
+    "DoctorReport",
+    "DOCTOR_CHECK_NAMES",
+    "run_doctor",
+    "audit_log_path",
+    "iter_audit_log",
+    "aggregate_audit_stats",
+    "detect_audit_anomalies",
+    "parse_since",
     "build_proxy_config",
     "discover_provider_mappings",
+    "discover_xapikey_mappings",
     "discover_blocked_providers",
     "discover_uncovered_providers",
     "ensure_audit_log",
