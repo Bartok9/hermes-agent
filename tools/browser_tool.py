@@ -3243,19 +3243,25 @@ def _chromium_installed() -> bool:
 
     Checks, in order:
 
-    1. ``AGENT_BROWSER_EXECUTABLE_PATH`` env var — the official way to point
-       agent-browser at a pre-installed Chrome/Chromium.
-    2. System Chrome/Chromium in PATH (``google-chrome``, ``chromium-browser``,
-       ``chrome``).
-    3. Playwright's browser cache (current logic) — directories containing
-       ``chromium-*`` or ``chromium_headless_shell-*``.
+    1. ``AGENT_BROWSER_EXECUTABLE_PATH`` env var — the official, explicit way
+       to point agent-browser at a pre-installed Chrome/Chromium.
+    2. Playwright's browser cache — directories containing ``chromium-*`` or
+       ``chromium_headless_shell-*`` under one of the search roots.
 
     agent-browser (0.26+) downloads Playwright's chromium / headless-shell
     builds into ``PLAYWRIGHT_BROWSERS_PATH`` and won't start without at least
-    one of the three above being present.  Without a browser binary the CLI
+    one of the two above being present.  Without a browser binary the CLI
     hangs on first use until the command timeout fires (often ~30s).  Guarding
     the tool behind this check prevents advertising a capability that will
     fail at runtime.
+
+    Note: a bare ``google-chrome``/``chromium-browser``/``chrome`` on ``PATH``
+    is intentionally **not** treated as sufficient.  Playwright-driven
+    agent-browser does not auto-adopt an arbitrary system Chrome unless it is
+    pointed there explicitly via ``AGENT_BROWSER_EXECUTABLE_PATH`` (check #1).
+    Counting a stray system Chrome here produced false positives — the tool
+    reported "installed" on machines (e.g. CI runners) that had Chrome on
+    PATH but no Playwright build, defeating the fast-fail guard.
     """
     global _cached_chromium_installed
     if _cached_chromium_installed is not None:
@@ -3268,13 +3274,7 @@ def _chromium_installed() -> bool:
             _cached_chromium_installed = True
             return True
 
-    # 2. System Chrome/Chromium in PATH (common names)
-    system_chrome = shutil.which("google-chrome") or shutil.which("chromium-browser") or shutil.which("chrome")
-    if system_chrome:
-        _cached_chromium_installed = True
-        return True
-
-    # 3. Playwright browser cache (legacy — chromium-* / chromium_headless_shell-* dirs)
+    # 2. Playwright browser cache (chromium-* / chromium_headless_shell-* dirs)
     for root in _chromium_search_roots():
         if not root or not os.path.isdir(root):
             continue
