@@ -152,7 +152,7 @@ def _get_session_db() -> Optional[Any]:
     """
     try:
         from hermes_constants import get_hermes_home
-        from hermes_state import SessionDB
+        from hermes_state import DEFAULT_DB_PATH, SessionDB
 
         home = str(get_hermes_home())
     except Exception as exc:  # pragma: no cover
@@ -165,14 +165,14 @@ def _get_session_db() -> Optional[Any]:
     try:
         # Resolve the DB path from the *live* HERMES_HOME rather than relying
         # on SessionDB's import-time DEFAULT_DB_PATH. hermes_state computes
-        # DEFAULT_DB_PATH = get_hermes_home() / "state.db" at module import,
+        # DEFAULT_DB_PATH with the active HERMES_HOME at module import,
         # so a bare SessionDB() is permanently pinned to whatever HERMES_HOME
         # was set when hermes_state first imported. That made the GoalManager
         # ignore profile/HERMES_HOME switches at runtime and (in tests) leak
         # goal state across cases that point HERMES_HOME at fresh temp dirs.
         # Passing the path explicitly keeps the per-home cache correct.
         from pathlib import Path as _Path
-        db = SessionDB(db_path=_Path(home) / "state.db")
+        db = SessionDB(db_path=_Path(home) / DEFAULT_DB_PATH.name)
     except Exception as exc:  # pragma: no cover
         logger.debug("GoalManager: SessionDB() raised (%s)", exc)
         return None
