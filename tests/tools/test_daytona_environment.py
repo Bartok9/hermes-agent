@@ -311,10 +311,12 @@ class TestExecute:
         env = make_env(sandbox=sb)
 
         env.execute("pwd", cwd="/tmp")
-        # CWD should be embedded in the command string via _wrap_command
+        # CWD should be embedded in the command string via _wrap_command.
+        # The wrapper emits the more robust ``builtin cd -- <dir>`` form
+        # (builtin avoids cd-function overrides; ``--`` guards hyphen dirs).
         call_args = sb.process.exec.call_args_list[-1]
         cmd = call_args[0][0]
-        assert "cd /tmp" in cmd
+        assert "builtin cd -- /tmp" in cmd
         # CWD should NOT be passed as a kwarg to exec
         assert "cwd" not in call_args[1]
 
