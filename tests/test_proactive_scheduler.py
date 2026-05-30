@@ -25,9 +25,16 @@ from hermes_cli.proactive_scheduler import (
 # ──────────────────────────────────────────────────────────────────────
 
 def _make_messages(hour_weights: Dict[int, int], base_length: int = 100) -> List[Dict[str, Any]]:
-    """Create synthetic message history with given counts per local hour."""
+    """Create synthetic message history with given counts per UTC hour.
+
+    The reference day is floored to midnight UTC so that ``hour * 3600`` maps
+    to exactly that UTC hour. analyze_flow() buckets by UTC hour (tz_offset=0),
+    so an un-aligned reference (e.g. ``time.time() - 15d``) would smear the
+    intended hour by the current wall-clock hour and make these assertions
+    wall-clock/timezone dependent.
+    """
     msgs = []
-    ref_day = time.time() - 15 * 86400
+    ref_day = (int(time.time()) // 86400) * 86400 - 15 * 86400
     day = 0
     for hour, count in hour_weights.items():
         for i in range(count):
@@ -98,7 +105,9 @@ def test_confidence_increases_with_clear_peak():
 
 
 def test_timezone_offset_shifts_peak():
-    ref = time.time() - 15 * 86400
+    # Floor to midnight UTC so "+ 14*3600" is exactly 14:00 UTC regardless of
+    # the wall-clock hour the test happens to run at.
+    ref = (int(time.time()) // 86400) * 86400 - 15 * 86400
     # Messages at UTC hour 14 every day
     msgs = [
         {"role": "user", "ts": ref + i * 86400 + 14 * 3600, "content": "x" * 200}
