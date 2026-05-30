@@ -985,9 +985,17 @@ def evaluate_all(force: bool = False) -> Dict[str, Any]:
 
     # Non-force path: serve whatever we have and refresh in background.
     if _SNAPSHOT_CACHE is not None:
+        # Capture the snapshot we intend to serve BEFORE kicking the
+        # background scan. The background thread rebinds _SNAPSHOT_CACHE to
+        # a fresh (or partial) dict as soon as it makes progress, so reading
+        # the module global again after _start_background_scan() races the
+        # worker and can return the freshly-scanned payload instead of the
+        # stale data the caller asked us to serve. Returning the captured
+        # reference guarantees stale-serves-stale semantics.
+        served = _SNAPSHOT_CACHE
         if not _cache_is_fresh(now):
             _start_background_scan()
-        return _SNAPSHOT_CACHE
+        return served
 
     # First-ever run on this machine — no snapshot yet. Kick off a scan
     # and return a pending placeholder. The UI polls /scan-status and

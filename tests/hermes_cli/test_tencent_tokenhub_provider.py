@@ -309,7 +309,10 @@ class TestTencentTokenhubContextLength:
     def test_hy3_preview_context_length(self):
         from agent.model_metadata import get_model_context_length
         ctx = get_model_context_length("hy3-preview")
-        assert ctx == 256000
+        # 256K context window == 256 * 1024 == 262144 (true binary 256K).
+        # OpenRouter's live metadata (the authoritative source consulted
+        # before the hardcoded fallback) reports 262144 for hy3-preview.
+        assert ctx == 262144
 
 
 # =============================================================================

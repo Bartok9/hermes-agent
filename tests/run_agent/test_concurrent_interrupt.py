@@ -32,6 +32,14 @@ def _make_agent(monkeypatch):
         verbose_logging = False
         log_prefix_chars = 200
         _checkpoint_mgr = MagicMock(enabled=False)
+        # Tool guardrail layer (added to _execute_tool_calls_concurrent after
+        # this fixture was first written). The concurrent executor calls
+        # ``_tool_guardrails.before_call(name, args)`` and inspects
+        # ``.allows_execution`` before dispatching each tool. Stub it as a
+        # permissive layer so every tool is allowed through.
+        _tool_guardrails = MagicMock(
+            **{"before_call.return_value": MagicMock(allows_execution=True)}
+        )
         _subdirectory_hints = MagicMock()
         tool_progress_callback = None
         tool_start_callback = None
@@ -81,6 +89,11 @@ def _make_agent(monkeypatch):
     # tool batch. Stub it as a no-op — this test exercises interrupt
     # fanout, not steer injection.
     stub._apply_pending_steer_to_tool_results = lambda *a, **kw: None
+    # Guardrail observation is appended to each tool result after execution.
+    # The stub passes the result through unchanged (no guardrail annotations).
+    stub._append_guardrail_observation = (
+        lambda function_name, function_args, function_result, failed=False: function_result
+    )
     stub._invoke_tool = MagicMock(side_effect=lambda *a, **kw: '{"ok": true}')
     return stub
 
@@ -107,7 +120,7 @@ def test_concurrent_interrupt_cancels_pending(monkeypatch):
 
     original_invoke = agent._invoke_tool
 
-    def slow_tool(name, args, task_id, call_id=None):
+    def slow_tool(name, args, task_id, call_id=None, **kwargs):
         if name == "slow_one":
             # Block until the test sets the interrupt
             barrier.wait(timeout=10)
@@ -184,7 +197,7 @@ def test_running_concurrent_worker_sees_is_interrupted(monkeypatch):
     observed = {"saw_true": False, "poll_count": 0, "worker_tid": None}
     worker_started = threading.Event()
 
-    def polling_tool(name, args, task_id, call_id=None, messages=None):
+    def polling_tool(name, args, task_id, call_id=None, messages=None, **kwargs):
         observed["worker_tid"] = threading.current_thread().ident
         worker_started.set()
         deadline = time.monotonic() + 5.0
