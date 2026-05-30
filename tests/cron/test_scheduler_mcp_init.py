@@ -54,6 +54,15 @@ def test_run_job_calls_discover_mcp_tools_before_agent_construction():
 
     with patch("tools.mcp_tool.discover_mcp_tools", side_effect=fake_discover), \
          patch("run_agent.AIAgent", _FakeAgent), \
+         patch(
+             "hermes_cli.runtime_provider.resolve_runtime_provider",
+             return_value={
+                 "api_key": "test-key",
+                 "base_url": "https://example.invalid/v1",
+                 "provider": "openrouter",
+                 "api_mode": "chat_completions",
+             },
+         ), \
          patch("cron.scheduler._resolve_cron_enabled_toolsets", return_value=None):
         scheduler.run_job(job)
 
@@ -100,6 +109,15 @@ def test_run_job_tolerates_discover_mcp_tools_failure():
         "tools.mcp_tool.discover_mcp_tools",
         side_effect=fake_discover_that_raises,
     ), patch("run_agent.AIAgent", _FakeAgent), \
+         patch(
+             "hermes_cli.runtime_provider.resolve_runtime_provider",
+             return_value={
+                 "api_key": "test-key",
+                 "base_url": "https://example.invalid/v1",
+                 "provider": "openrouter",
+                 "api_mode": "chat_completions",
+             },
+         ), \
          patch("cron.scheduler._resolve_cron_enabled_toolsets", return_value=None):
         # Should NOT raise
         success, doc, final_response, error = scheduler.run_job(job)

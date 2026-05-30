@@ -301,7 +301,10 @@ class TestProviderPersistsAfterModelSave:
             lambda api_key=None, base_url=None, timeout=5.0: ["publisher/model-a"],
         )
 
-        with patch("builtins.input", side_effect=[""]):
+        # Two interactive prompts fire with an existing key present:
+        #   1. _prompt_api_key's [K]eep/[R]eplace/[C]lear prompt ("" -> Keep)
+        #   2. the Base URL override prompt ("" -> keep default)
+        with patch("builtins.input", side_effect=["", ""]):
             _model_flow_api_key_provider(load_config(), "lmstudio", "old-model")
 
         import yaml
@@ -403,6 +406,11 @@ class TestBaseUrlValidation:
             return_value="step-3-agent-lite",
         ), patch(
             "hermes_cli.auth.deactivate_provider",
+        ), patch(
+            # An existing STEPFUN_API_KEY triggers _prompt_api_key's
+            # [K]eep/[R]eplace/[C]lear prompt; "" keeps the existing key.
+            "builtins.input",
+            return_value="",
         ):
             _model_flow_stepfun(load_config(), "old-model")
 

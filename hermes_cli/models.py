@@ -3269,9 +3269,23 @@ def validate_requested_model(
                     "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
                 }
             suggestions = get_close_matches(requested_for_lookup, codex_models, n=3, cutoff=0.5)
-            suggestion_text = ""
-            if suggestions:
-                suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
+            if not suggestions:
+                # Name is too different from any known Codex model to even
+                # offer a suggestion — reject it rather than silently
+                # accepting an almost-certainly-wrong slug. (Names that are
+                # merely close-but-not-exact still fall through to the
+                # proxy-friendly accept-with-suggestions path below.)
+                return {
+                    "accepted": False,
+                    "persist": False,
+                    "recognized": False,
+                    "corrected_model": None,
+                    "message": (
+                        f"`{requested}` was not found in the OpenAI Codex model "
+                        "listing and is not close to any known model ID."
+                    ),
+                }
+            suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
             return {
                 "accepted": True,
                 "persist": True,
