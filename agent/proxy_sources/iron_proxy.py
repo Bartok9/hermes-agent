@@ -69,6 +69,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -665,6 +666,338 @@ def ensure_ca_cert(*, force: bool = False) -> Tuple[Path, Path]:
 
     logger.info("Generated iron-proxy CA at %s", ca_crt)
     return ca_crt, ca_key
+
+
+# ---------------------------------------------------------------------------
+# CA rotation
+#
+# ``ensure_ca_cert`` mints a 10-year self-signed CA and only regenerates it
+# when ``force=True``.  Rotation (PR #30179 scope-cut: "The CA is a 10-year
+# self-signed cert.  Rotation is manual for now.") layers an *operator-facing
+# workflow* on top of that primitive: archive the old CA, atomically swap in a
+# fresh one, restart the daemon, and record an audit trail so the doctor can
+# nag about annual hygiene.
+# ---------------------------------------------------------------------------
+
+_ROTATION_HISTORY_NAME = "rotation-history.jsonl"
+_CA_ARCHIVE_DIRNAME = "ca-archive"
+_CA_ARCHIVE_KEEP = 5
+
+
+def _rotation_history_path() -> Path:
+    """Path to the append-only rotation audit log (JSON-Lines)."""
+    return _proxy_state_dir_ro() / _ROTATION_HISTORY_NAME
+
+
+def _ca_archive_dir() -> Path:
+    """Path to the dir holding superseded CA certs (created on demand)."""
+    return _proxy_state_dir_ro() / _CA_ARCHIVE_DIRNAME
+
+
+def _redact_fingerprint(value: str) -> str:
+    """Redact a hex fingerprint to first-8/last-8 chars for error paths.
+
+    A SHA-256 fingerprint isn't secret the way a private key is, but error
+    messages get logged and shipped to SIEMs; we keep the same
+    defence-in-depth posture as :func:`_redact_secret` so a malformed value
+    (which could contain an injected key fragment) never echoes in full.
+    Short / empty strings collapse entirely.
+    """
+    if not value:
+        return "(empty)"
+    cleaned = value.strip()
+    if len(cleaned) <= 16:
+        return "****"
+    return f"{cleaned[:8]}...{cleaned[-8:]}"
+
+
+def _ca_fingerprint_sha256(ca_crt: Path) -> str:
+    """Return the cert's SHA-256 fingerprint (lowercase hex, no colons).
+
+    Uses ``openssl x509 -fingerprint -sha256`` (already a hard dep).  Raises
+    ``RuntimeError`` on any failure; callers that surface the error MUST run
+    it through :func:`_redact_fingerprint` first.
+    """
+    if shutil.which("openssl") is None:
+        raise RuntimeError("openssl not found on PATH")
+    res = subprocess.run(  # noqa: S603 -- openssl trusted PATH lookup
+        ["openssl", "x509", "-fingerprint", "-sha256", "-noout",
+         "-in", str(ca_crt)],
+        capture_output=True, text=True, timeout=10,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"openssl fingerprint failed (rc={res.returncode}): "
+            f"{(res.stderr or '').strip()}"
+        )
+    # Output: ``sha256 Fingerprint=AB:CD:...`` -> strip label + colons.
+    line = (res.stdout or "").strip()
+    if "=" not in line:
+        raise RuntimeError("unexpected openssl fingerprint output")
+    raw = line.split("=", 1)[1].strip().replace(":", "").lower()
+    if not raw:
+        raise RuntimeError("empty fingerprint")
+    return raw
+
+
+def _ca_subject_cn(ca_crt: Path) -> Optional[str]:
+    """Best-effort extraction of the CA subject CN, or None."""
+    if shutil.which("openssl") is None:
+        return None
+    try:
+        res = subprocess.run(  # noqa: S603
+            ["openssl", "x509", "-subject", "-noout", "-in", str(ca_crt)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    return (res.stdout or "").strip() or None
+
+
+def _prune_ca_archive(keep: int = _CA_ARCHIVE_KEEP) -> List[Path]:
+    """Keep only the ``keep`` most recent archived CAs (by filename sort).
+
+    Returns the list of pruned paths.  The archive filenames embed a
+    ``YYYYMMDD-HHMMSS`` stamp so lexical sort == chronological sort.
+    """
+    arc = _ca_archive_dir()
+    if not arc.exists():
+        return []
+    certs = sorted(p for p in arc.glob("ca-*.crt") if p.is_file())
+    pruned: List[Path] = []
+    if len(certs) > keep:
+        for old in certs[: len(certs) - keep]:
+            try:
+                old.unlink()
+                pruned.append(old)
+            except OSError as exc:  # noqa: BLE001 -- best-effort prune
+                logger.warning("could not prune archived CA %s: %s", old, exc)
+    return pruned
+
+
+@dataclass
+class RotationPlan:
+    """What a ``rotate-ca`` invocation would (or did) do.
+
+    Used by both the ``--dry-run`` preview and the real path so the two
+    cannot diverge.  ``subject`` / ``valid_until`` are populated only after
+    the new CA exists (None during a dry-run preview of a not-yet-minted
+    cert).
+    """
+
+    ca_crt: Path
+    ca_key: Path
+    archive_path: Path
+    old_fingerprint: Optional[str] = None
+    new_fingerprint: Optional[str] = None
+    new_subject: Optional[str] = None
+    new_valid_until: Optional[str] = None
+    daemon_running: bool = False
+    sandboxes: List[Tuple[str, str]] = field(default_factory=list)
+
+
+def _proxy_is_running() -> bool:
+    """True iff the managed iron-proxy daemon is alive (read-only probe)."""
+    pid = _read_pid()
+    return bool(pid and _pid_alive(pid))
+
+
+def list_hermes_sandboxes() -> List[Tuple[str, str]]:
+    """Return ``[(container_id, name), ...]`` for labeled Hermes sandboxes.
+
+    Uses ``docker ps --filter label=hermes.sandbox=true``.  Graceful: if
+    docker is absent, errors, or there are no matching containers, returns
+    an empty list (never raises).  Operators must restart these after a CA
+    rotation so they re-mount the new ``ca.crt``.
+    """
+    if shutil.which("docker") is None:
+        return []
+    try:
+        res = subprocess.run(  # noqa: S603 -- docker trusted PATH lookup
+            ["docker", "ps", "--filter", "label=hermes.sandbox=true",
+             "--format", "{{.ID}}\t{{.Names}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if res.returncode != 0:
+        return []
+    out: List[Tuple[str, str]] = []
+    for line in (res.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        cid = parts[0].strip()
+        name = parts[1].strip() if len(parts) > 1 else ""
+        if cid:
+            out.append((cid, name))
+    return out
+
+
+def plan_ca_rotation() -> RotationPlan:
+    """Compute what a rotation would do without mutating anything.
+
+    Captures the current CA fingerprint (if present), the archive path the
+    old CA would move to, the running-daemon flag, and the labeled sandbox
+    list.  Pure: read-only filesystem + docker/openssl probes.
+    """
+    state = _proxy_state_dir_ro()
+    ca_crt = state / "ca.crt"
+    ca_key = state / "ca.key"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    archive_path = _ca_archive_dir() / f"ca-{stamp}.crt"
+
+    old_fp: Optional[str] = None
+    if ca_crt.exists():
+        try:
+            old_fp = _ca_fingerprint_sha256(ca_crt)
+        except RuntimeError as exc:
+            logger.warning(
+                "could not fingerprint existing CA: %s",
+                _redact_fingerprint(str(exc)),
+            )
+
+    return RotationPlan(
+        ca_crt=ca_crt,
+        ca_key=ca_key,
+        archive_path=archive_path,
+        old_fingerprint=old_fp,
+        daemon_running=_proxy_is_running(),
+        sandboxes=list_hermes_sandboxes(),
+    )
+
+
+def rotate_ca(
+    *,
+    reason: Optional[str] = None,
+    restart: bool = True,
+    operator: Optional[str] = None,
+    refresh_secrets_from_bitwarden: bool = False,
+    bitwarden_config: Optional[Dict] = None,
+) -> RotationPlan:
+    """Generate a fresh CA, archive the old one, and (optionally) restart.
+
+    Steps (each best-effort-safe, ordered so a crash never leaves a missing
+    live CA):
+      1. Archive the *current* ``ca.crt`` into ``ca-archive/ca-<stamp>.crt``
+         BEFORE touching the live cert, then prune the archive to
+         :data:`_CA_ARCHIVE_KEEP`.
+      2. Mint a new CA via ``ensure_ca_cert(force=True)`` (atomic 0o600 key
+         write + os.replace, identical to first-boot generation).
+      3. If ``restart`` and the daemon is alive: ``stop_proxy()`` then
+         ``start_proxy(refresh_secrets_from_bitwarden=..., bitwarden_config=...)``
+         so the running proxy re-reads the new signing key AND re-honours
+         the operator's existing credential-source choice. If we instead
+         called ``start_proxy()`` with no args, an operator on
+         ``credential_source: bitwarden`` would silently get a proxy that
+         can't fetch upstream secrets — running but degraded. Caught by
+         Cursor Bugbot review (medium severity).
+      4. Append a structured entry to ``rotation-history.jsonl``.
+
+    Returns the populated :class:`RotationPlan` describing what happened.
+    Never logs the private key; fingerprint failures are redacted.
+    """
+    plan = plan_ca_rotation()
+    state = _proxy_state_dir()  # writable -- ensures dir exists @ 0o700
+
+    # 1. Archive the old CA cert (public PEM) before replacing it.
+    if plan.ca_crt.exists():
+        arc_dir = _ca_archive_dir()
+        arc_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            arc_dir.chmod(0o700)
+        except OSError:
+            pass
+        try:
+            plan.archive_path.write_bytes(plan.ca_crt.read_bytes())
+            os.chmod(plan.archive_path,
+                     stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not archive old CA to {plan.archive_path}: {exc}"
+            ) from exc
+        _prune_ca_archive()
+
+    # 2. Mint the new CA (atomic; ensure_ca_cert handles the staging dance).
+    ca_crt, ca_key = ensure_ca_cert(force=True)
+    plan.ca_crt = ca_crt
+    plan.ca_key = ca_key
+    try:
+        plan.new_fingerprint = _ca_fingerprint_sha256(ca_crt)
+    except RuntimeError as exc:
+        # Don't abort the rotation for a fingerprint read miss -- the new
+        # CA is already live.  Record a redacted marker instead.
+        logger.warning(
+            "new CA minted but fingerprint unreadable: %s",
+            _redact_fingerprint(str(exc)),
+        )
+        plan.new_fingerprint = None
+    plan.new_subject = _ca_subject_cn(ca_crt)
+    not_after = _ca_not_after(ca_crt)
+    plan.new_valid_until = not_after.isoformat() if not_after else None
+
+    # 3. Restart the daemon if it was running and the caller wants it.
+    #    Pass the credential-source kwargs through so a Bitwarden-mode
+    #    operator doesn't silently lose secret refresh on restart. The CLI
+    #    layer (``cmd_rotate_ca``) computes these from ``proxy_cfg``
+    #    identically to ``cmd_start`` and forwards them here.
+    if restart and plan.daemon_running:
+        stop_proxy()
+        start_proxy(
+            refresh_secrets_from_bitwarden=refresh_secrets_from_bitwarden,
+            bitwarden_config=bitwarden_config,
+        )
+
+    # 4. Append the audit record.
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "old_fingerprint_sha256": plan.old_fingerprint,
+        "new_fingerprint_sha256": plan.new_fingerprint,
+        "reason": reason,
+        "operator": operator or os.getenv("USER") or "unknown",
+        "subject": plan.new_subject,
+        "valid_until": plan.new_valid_until,
+    }
+    hist = _rotation_history_path()
+    try:
+        with hist.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        os.chmod(hist, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    except OSError as exc:  # noqa: BLE001 -- history is best-effort
+        logger.warning("could not append rotation history to %s: %s",
+                       hist, exc)
+
+    logger.info("Rotated iron-proxy CA (reason=%s)", reason or "(none)")
+    return plan
+
+
+def last_rotation_entry() -> Optional[Dict]:
+    """Return the last parseable entry from ``rotation-history.jsonl``, or None.
+
+    Tolerant of trailing/garbage lines -- scans from the end and returns the
+    most recent line that parses as a JSON object with a ``ts`` field.
+    """
+    hist = _rotation_history_path()
+    if not hist.exists():
+        return None
+    try:
+        lines = hist.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and obj.get("ts"):
+            return obj
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1971,6 +2304,37 @@ def _tail_log(path: Path, *, lines: int = 20) -> str:
 
 
 # ---------------------------------------------------------------------------
+def _ca_not_after(ca_crt: Path) -> Optional[datetime]:
+    """Return the CA cert's notAfter as an aware UTC datetime, or None.
+
+    Uses ``openssl x509 -enddate`` (already a hard dep for CA generation)
+    so we don't pull in ``cryptography`` just to read one field.
+    """
+    if shutil.which("openssl") is None:
+        return None
+    try:
+        res = subprocess.run(  # noqa: S603 -- openssl trusted PATH lookup
+            ["openssl", "x509", "-enddate", "-noout", "-in", str(ca_crt)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    # Output: ``notAfter=Jun  1 12:00:00 2035 GMT``
+    line = res.stdout.strip()
+    if "=" not in line:
+        return None
+    raw = line.split("=", 1)[1].strip()
+    for fmt in ("%b %d %H:%M:%S %Y %Z", "%b %d %H:%M:%S %Y"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 # Test hook
 # ---------------------------------------------------------------------------
 
@@ -2005,6 +2369,11 @@ __all__ = [
     "discover_uncovered_providers",
     "ensure_audit_log",
     "ensure_ca_cert",
+    "rotate_ca",
+    "plan_ca_rotation",
+    "RotationPlan",
+    "last_rotation_entry",
+    "list_hermes_sandboxes",
     "find_iron_proxy",
     "get_status",
     "install_iron_proxy",

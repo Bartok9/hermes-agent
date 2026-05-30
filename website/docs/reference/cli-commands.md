@@ -479,9 +479,17 @@ hermes egress stop                     # SIGTERM (then SIGKILL after 5s grace)
 hermes egress status                   # binary + config + pid + listening + mappings
 hermes egress status --show-tokens     # print proxy tokens in full (default: redacted)
 
+hermes egress rotate-ca                # archive old CA, mint a fresh one, restart daemon, record history
+hermes egress rotate-ca --reason TEXT  # record a free-text rotation reason in rotation-history.jsonl
+hermes egress rotate-ca --dry-run      # preview (new subject, archive path, sandboxes) with NO file changes
+hermes egress rotate-ca --no-restart   # mint + archive but leave the daemon running on the old key (staged rollout)
+hermes egress rotate-ca --force        # skip the running-sandbox confirmation prompt
+
 hermes egress disable                  # flip proxy.enabled = false (does not stop a running proxy)
 hermes egress config                   # print the path to proxy.yaml for inspection
 ```
+
+`rotate-ca` archives the live `ca.crt` to `~/.hermes/proxy/ca-archive/` (keeping the five most recent), mints a fresh CA via the same atomic path as first-boot generation, restarts the managed daemon if it was running, and appends an audit record to `~/.hermes/proxy/rotation-history.jsonl`; running sandboxes must be restarted afterwards to re-mount the new CA. See [CA rotation](../user-guide/egress/iron-proxy.md#ca-rotation).
 
 ### Common flows
 
