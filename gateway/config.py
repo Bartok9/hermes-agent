@@ -130,28 +130,54 @@ class Platform(Enum):
         if _Platform__bundled_plugin_names is None:
             _Platform__bundled_plugin_names = cls._scan_bundled_plugin_platforms()
         if value in _Platform__bundled_plugin_names:
-            pseudo = object.__new__(cls)
-            pseudo._value_ = value
-            pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
-            cls._value2member_map_[value] = pseudo
-            cls._member_map_[pseudo._name_] = pseudo
-            return pseudo
+            return cls._make_pseudo_member(value)
 
         # Runtime-registered plugins (e.g. user-installed, discovered after
         # the enum was defined).
         try:
             from gateway.platform_registry import platform_registry
             if platform_registry.is_registered(value):
-                pseudo = object.__new__(cls)
-                pseudo._value_ = value
-                pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
-                cls._value2member_map_[value] = pseudo
-                cls._member_map_[pseudo._name_] = pseudo
-                return pseudo
+                return cls._make_pseudo_member(value)
         except Exception:
             pass
 
         return None
+
+    @classmethod
+    def _make_pseudo_member(cls, value):
+        """Create and cache a dynamic enum member for a plugin platform.
+
+        Registers the pseudo-member in ``_value2member_map_`` and
+        ``_member_map_`` so ``Platform(value)`` is identity-stable, AND binds
+        it as a class attribute via ``setattr`` so ``Platform.GOOGLE_CHAT``
+        attribute access works.
+
+        The ``setattr`` is required on Python 3.12+: ``EnumType`` no longer
+        routes attribute access through ``_member_map_`` (the old
+        ``__getattr__`` hook was removed), so members injected only into
+        ``_member_map_`` are invisible to attribute lookup. Binding the
+        attribute directly keeps dynamic plugin platforms reachable by name
+        across all supported Python versions (>=3.10).
+        """
+        name = value.upper().replace("-", "_").replace(" ", "_")
+        pseudo = object.__new__(cls)
+        pseudo._value_ = value
+        pseudo._name_ = name
+        cls._value2member_map_[value] = pseudo
+        cls._member_map_[name] = pseudo
+        # Bind as a class attribute so ``Platform.<NAME>`` resolves on
+        # Python 3.12+ where EnumType no longer consults ``_member_map_``
+        # for attribute access. ``EnumType.__setattr__`` rejects assigning a
+        # name it already considers a member (it lives in ``_member_map_``
+        # now), so we go through ``type.__setattr__`` to bypass that guard
+        # and write directly into the class ``__dict__``. Skip if a real
+        # attribute already occupies the name.
+        if name not in cls.__dict__:
+            try:
+                type.__setattr__(cls, name, pseudo)
+            except Exception:
+                pass
+        return pseudo
 
     @classmethod
     def _scan_bundled_plugin_platforms(cls) -> set:
@@ -178,6 +204,25 @@ class Platform(Enum):
 # Snapshot of built-in platform values before any dynamic _missing_ lookups.
 # Used to distinguish real platforms from arbitrary strings.
 _BUILTIN_PLATFORM_VALUES = frozenset(m.value for m in Platform.__members__.values())
+
+
+# Eagerly materialize bundled plugin platforms (e.g. ``google_chat``, ``irc``,
+# ``teams``) as enum members at import time. This makes attribute access such
+# as ``Platform.GOOGLE_CHAT`` resolve immediately, regardless of whether the
+# platform is enabled/configured.
+#
+# Without this, the pseudo-members are only created lazily on the first
+# ``Platform("google_chat")`` *call*. On Python 3.12+ that lazy path is not
+# enough on its own for attribute access (EnumType no longer routes attribute
+# lookups through ``_member_map_``), and code/tests that reference
+# ``Platform.GOOGLE_CHAT`` before the platform is enabled would raise
+# AttributeError. Materializing here keeps dynamic platforms reachable by name
+# across all supported Python versions (>=3.10).
+for _bundled_name in sorted(Platform._scan_bundled_plugin_platforms()):
+    try:
+        Platform(_bundled_name)  # triggers _missing_ -> _make_pseudo_member
+    except Exception:
+        pass
 
 
 @dataclass
