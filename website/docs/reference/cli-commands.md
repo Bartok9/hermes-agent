@@ -485,6 +485,12 @@ hermes egress doctor --json            # machine-readable {checks[], summary{}};
 hermes egress doctor --no-network      # skip reachability + token-swap probes (CI / hermetic)
 hermes egress doctor --check NAME      # run only the named check (repeatable)
 
+hermes egress rotate-ca                # archive old CA, mint a fresh one, restart daemon, record history
+hermes egress rotate-ca --reason TEXT  # record a free-text rotation reason in rotation-history.jsonl
+hermes egress rotate-ca --dry-run      # preview (new subject, archive path, sandboxes) with NO file changes
+hermes egress rotate-ca --no-restart   # mint + archive but leave the daemon running on the old key (staged rollout)
+hermes egress rotate-ca --force        # skip the running-sandbox confirmation prompt
+
 hermes egress audit tail [-n N] [-f]   # last N audit lines, -f follows (250ms poll)
 hermes egress audit grep PATTERN --since 1h   # regex + time-window filter
 hermes egress audit stats --since 1h   # status distribution, top hosts/sandboxes, anomalies
@@ -494,7 +500,7 @@ hermes egress disable                  # flip proxy.enabled = false (does not st
 hermes egress config                   # print the path to proxy.yaml for inspection
 ```
 
-`--since` accepts relative durations (`30m`/`2h`/`7d`/`1w`), `today`, or an ISO-8601 date/datetime. `doctor` exits `0` when no check fails (warns/skips tolerated) and `1` otherwise; `--check` names are: `binary`, `ca`, `config`, `mappings`, `daemon`, `listening`, `reachability`, `token-swap`, `uncovered`, `docker-dns`, `ssrf-deny`.
+`--since` accepts relative durations (`30m`/`2h`/`7d`/`1w`), `today`, or an ISO-8601 date/datetime. `doctor` exits `0` when no check fails (warns/skips tolerated) and `1` otherwise; `--check` names are: `binary`, `ca`, `ca-rotation`, `config`, `mappings`, `daemon`, `listening`, `reachability`, `token-swap`, `uncovered`, `docker-dns`, `ssrf-deny`. `rotate-ca` archives the live `ca.crt` to `~/.hermes/proxy/ca-archive/` (keeping the five most recent), mints a fresh CA via the same atomic path as first-boot generation, restarts the managed daemon if it was running, and appends an audit record to `~/.hermes/proxy/rotation-history.jsonl`; running sandboxes must be restarted afterwards to re-mount the new CA. The companion `ca-rotation` doctor check warns once a rotation is older than a year (annual hygiene), distinct from the `ca` expiry check. See [CA rotation](../user-guide/egress/iron-proxy.md#ca-rotation).
 
 ### Common flows
 

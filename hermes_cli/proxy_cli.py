@@ -125,6 +125,31 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
     )
     doctor.set_defaults(func=cmd_doctor)
 
+    rotate = sub.add_parser(
+        "rotate-ca",
+        help="Rotate the iron-proxy CA: archive the old cert, mint a fresh "
+             "one, restart the daemon, and record the rotation.",
+    )
+    rotate.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Print what WOULD happen (new subject, archive path, sandboxes "
+             "to restart) without changing any files.",
+    )
+    rotate.add_argument(
+        "--reason", default=None, metavar="TEXT",
+        help="Free-text reason recorded in rotation-history.jsonl.",
+    )
+    rotate.add_argument(
+        "--no-restart", action="store_true", dest="no_restart",
+        help="Mint + archive but do NOT restart the daemon (staged rollout).",
+    )
+    rotate.add_argument(
+        "--force", action="store_true", dest="force",
+        help="Skip the interactive confirmation when running sandboxes "
+             "would need restarting.",
+    )
+    rotate.set_defaults(func=cmd_rotate_ca)
+
     audit = sub.add_parser(
         "audit",
         help="View / search / aggregate the iron-proxy audit log.",
@@ -763,6 +788,96 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if report.ok:
         console.print("[green]✓ egress proxy looks healthy.[/green]")
     return 0 if report.ok else 1
+
+
+def cmd_rotate_ca(args: argparse.Namespace) -> int:
+    console = Console()
+
+    try:
+        plan = ip.plan_ca_rotation()
+    except Exception as exc:  # noqa: BLE001 -- user-facing error funnel
+        console.print(f"[red]✗ could not plan CA rotation:[/red] {exc}")
+        return 1
+
+    old_fp = ip._redact_fingerprint(plan.old_fingerprint or "")
+    sandboxes = plan.sandboxes
+
+    # ---------------------------------------------------------------- dry-run
+    if getattr(args, "dry_run", False):
+        console.print(Panel.fit(
+            "[bold]CA rotation — dry run[/bold]  (no files will change)",
+            border_style="cyan",
+        ))
+        t = Table(show_header=False, box=None, padding=(0, 2))
+        t.add_column("", style="bold")
+        t.add_column("")
+        t.add_row("Live CA", str(plan.ca_crt))
+        t.add_row("Old fingerprint", old_fp if plan.old_fingerprint else "[dim](no current CA)[/dim]")
+        t.add_row("New subject", "/CN=hermes iron-proxy CA")
+        t.add_row("Archive ->", str(plan.archive_path))
+        t.add_row("Daemon running", _yn(plan.daemon_running))
+        t.add_row("Would restart", _yn(plan.daemon_running and not getattr(args, "no_restart", False)))
+        console.print(t)
+        if sandboxes:
+            console.print()
+            console.print("[yellow]Sandboxes to restart afterwards:[/yellow]")
+            for cid, name in sandboxes:
+                console.print(f"  - {cid[:12]}  {name}")
+        else:
+            console.print("[dim]No labeled hermes sandboxes detected.[/dim]")
+        console.print()
+        console.print("[dim]Re-run without --dry-run to apply.[/dim]")
+        return 0
+
+    # --------------------------------------------------- interactive confirm
+    if sandboxes and not getattr(args, "force", False):
+        console.print(
+            f"[yellow]⚠[/yellow]  {len(sandboxes)} running hermes sandbox(es) "
+            "will keep trusting the OLD CA until restarted:"
+        )
+        for cid, name in sandboxes:
+            console.print(f"  - {cid[:12]}  {name}")
+        try:
+            answer = input("Proceed with rotation? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            console.print("[dim]Aborted — no changes made.[/dim]")
+            return 1
+
+    # ------------------------------------------------------------- do it
+    restart = not getattr(args, "no_restart", False)
+    try:
+        result = ip.rotate_ca(reason=getattr(args, "reason", None),
+                              restart=restart)
+    except Exception as exc:  # noqa: BLE001 -- user-facing error funnel
+        console.print(f"[red]✗ CA rotation failed:[/red] {exc}")
+        return 1
+
+    new_fp = ip._redact_fingerprint(result.new_fingerprint or "")
+    console.print("[green]✓[/green] CA rotated.")
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_column("", style="bold")
+    t.add_column("")
+    t.add_row("New CA", str(result.ca_crt))
+    t.add_row("New fingerprint", new_fp if result.new_fingerprint else "[dim](unreadable)[/dim]")
+    t.add_row("Valid until", result.new_valid_until or "[dim](unknown)[/dim]")
+    t.add_row("Archived old ->", str(result.archive_path)
+              if result.old_fingerprint else "[dim](no prior CA)[/dim]")
+    if result.daemon_running:
+        t.add_row("Daemon", "restarted" if restart else "[yellow]left running on OLD key (--no-restart)[/yellow]")
+    else:
+        t.add_row("Daemon", "[dim]was not running[/dim]")
+    console.print(t)
+
+    if sandboxes:
+        console.print()
+        console.print(
+            "[yellow]⚠  Restart these sandboxes so they re-mount the new CA:[/yellow]"
+        )
+        for cid, name in sandboxes:
+            console.print(f"  - {cid[:12]}  {name}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
