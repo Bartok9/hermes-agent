@@ -49,6 +49,40 @@ from hermes_cli.config import cfg_get
 # from _enforce_agent_cache_cap() and _session_expiry_watcher() below.
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
+
+# Soft-release of cache-evicted agents (LLM client teardown, child-subagent
+# cleanup) runs off the caller's thread so we never block while holding
+# _agent_cache_lock.  Previously each eviction spawned its own daemon thread;
+# under a burst of inserts (e.g. many concurrent sessions, or the live cache
+# stress test) that produced a thread-per-eviction storm — hundreds of
+# short-lived threads contending for the GIL and socket/SSL teardown all at
+# once, which could starve the inserting threads and blow past test timeouts.
+# A small bounded pool serialises the teardown work into a handful of workers
+# while keeping it fully asynchronous w.r.t. the cache lock.
+_AGENT_EVICT_POOL_MAX_WORKERS = 4
+_agent_evict_pool = None  # lazily created concurrent.futures.ThreadPoolExecutor
+_agent_evict_pool_lock = threading.Lock()
+
+
+def _get_agent_evict_pool():
+    """Return the shared bounded executor for soft agent-eviction teardown.
+
+    Lazily created so the cost is only paid once an eviction actually
+    happens.  Bounded worker count keeps a burst of evictions from spawning
+    an unbounded number of OS threads.
+    """
+    global _agent_evict_pool
+    pool = _agent_evict_pool
+    if pool is not None:
+        return pool
+    with _agent_evict_pool_lock:
+        if _agent_evict_pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _agent_evict_pool = ThreadPoolExecutor(
+                max_workers=_AGENT_EVICT_POOL_MAX_WORKERS,
+                thread_name_prefix="agent-cache-evict",
+            )
+        return _agent_evict_pool
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
@@ -12744,12 +12778,24 @@ class GatewayRunner:
                 key, len(_cache),
             )
             if agent is not None:
-                threading.Thread(
-                    target=self._release_evicted_agent_soft,
-                    args=(agent,),
-                    daemon=True,
-                    name=f"agent-cache-evict-{key[:24]}",
-                ).start()
+                # Hand teardown to the shared bounded pool instead of a fresh
+                # daemon thread per eviction; this caps the number of
+                # concurrent teardown threads during insert bursts while
+                # keeping the work off the cache-lock-holding caller.
+                try:
+                    _get_agent_evict_pool().submit(
+                        self._release_evicted_agent_soft, agent
+                    )
+                except Exception:
+                    # Pool unavailable (e.g. interpreter shutdown) — fall back
+                    # to the legacy per-eviction daemon thread so cleanup
+                    # still happens.
+                    threading.Thread(
+                        target=self._release_evicted_agent_soft,
+                        args=(agent,),
+                        daemon=True,
+                        name=f"agent-cache-evict-{key[:24]}",
+                    ).start()
 
     def _sweep_idle_cached_agents(self) -> int:
         """Evict cached agents whose AIAgent has been idle > _AGENT_CACHE_IDLE_TTL_SECS.
