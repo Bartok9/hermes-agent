@@ -427,6 +427,35 @@ def _reset_module_state():
     except Exception:
         pass
 
+    # --- agent.i18n — per-process catalog + language caches ---
+    # i18n._catalog_cache memoizes the flattened locale YAML per language for
+    # the process lifetime. Tests that point i18n._locales_dir at a temp
+    # directory (e.g. test_t_missing_key_in_non_english_falls_back_to_english)
+    # populate the cache with a *fake* catalog. monkeypatch restores
+    # _locales_dir afterward, but the stale fake catalog stays cached — so a
+    # later test's t("gateway.draining", lang="en") returns the raw key
+    # instead of the translated string. reset_language_cache() forces the
+    # real catalogs to reload from the on-disk locales/ dir.
+    try:
+        from agent import i18n as _i18n_mod
+        _i18n_mod.reset_language_cache()
+    except Exception:
+        pass
+
+    # --- tools.skill_provenance — write-origin ContextVar ---
+    # run_agent.process_message() binds this to "assistant_tool" (the
+    # foreground default for a normal AIAgent) on whatever thread runs a
+    # turn, and never resets it. Any test that exercises a turn therefore
+    # leaves the main context's write origin set to "assistant_tool", which
+    # then leaks into copy_context() snapshots taken by later tests (e.g.
+    # test_default_origin_is_foreground). Reset to the fresh-process default
+    # so the ContextVar's own default("foreground") governs untouched tests.
+    try:
+        from tools import skill_provenance as _prov_mod
+        _prov_mod._write_origin.set("foreground")
+    except Exception:
+        pass
+
     # --- tools.file_tools — per-task read history + file-ops cache ---
     # _read_tracker accumulates per-task_id read history for loop detection,
     # capped by _READ_HISTORY_CAP. If entries from a prior test persist, the

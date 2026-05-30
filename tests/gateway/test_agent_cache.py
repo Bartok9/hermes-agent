@@ -967,9 +967,24 @@ class TestAgentCacheSpilloverLive:
         N_THREADS = 8
         PER_THREAD = 20  # 8 * 20 = 160 inserts into a 16-slot cache
 
+        # Pre-build the real AIAgent instances BEFORE the timed/joined
+        # section. The behavior under test is concurrent cache insertion +
+        # _enforce_agent_cache_cap() under the shared lock, not agent
+        # construction. Each AIAgent() costs ~0.5s of GIL-bound I/O, so
+        # building 160 of them inside worker threads pushed the per-thread
+        # join window past its 30s timeout on shared CI runners (the cause
+        # of the spurious "possible deadlock?" timeout). Constructing them
+        # up front keeps the concurrency stress identical while removing the
+        # unrelated construction cost from the join window.
+        prebuilt = {
+            (tid, j): self._real_agent()
+            for tid in range(N_THREADS)
+            for j in range(PER_THREAD)
+        }
+
         def worker(tid: int):
             for j in range(PER_THREAD):
-                a = self._real_agent()
+                a = prebuilt[(tid, j)]
                 key = f"t{tid}-s{j}"
                 with runner._agent_cache_lock:
                     runner._agent_cache[key] = (a, "sig")
