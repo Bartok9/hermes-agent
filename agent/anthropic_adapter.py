@@ -237,17 +237,17 @@ def _supports_fast_mode(model: str) -> bool:
 # here so older Claude (4.5, 4.1) + compatible endpoints that still gate on
 # the headers continue to get the enhanced features.
 #
-# Do NOT include ``context-1m-2025-08-07`` here. Anthropic returns HTTP 400
-# ("long context beta is not yet available for this subscription") for
-# accounts without the long-context beta, which breaks normal short auxiliary
-# calls like title generation/session summarization.
-#
-# ``context-1m-2025-08-07`` is still required to unlock the 1M context window
-# on Claude Opus 4.6/4.7 and Sonnet 4.6 when served via AWS Bedrock or Azure
-# AI Foundry. Add it only for those endpoint-specific paths below.
+# ``context-1m-2025-08-07`` unlocks the 1M context window on Claude Opus
+# 4.6/4.7 and Sonnet 4.6.  As of Opus 4.7 the long-context beta is GA on
+# native Anthropic accounts, so we include it in the common set and let
+# ``_common_betas_for_base_url`` strip it for the endpoint families that
+# still reject it (currently MiniMax's bearer-auth endpoints).  Subscriptions
+# that reject it reactively are handled by the ``drop_context_1m_beta=True``
+# retry path in ``run_agent.py``.
 _COMMON_BETAS = [
     "interleaved-thinking-2025-05-14",
     "fine-grained-tool-streaming-2025-05-14",
+    "context-1m-2025-08-07",
 ]
 # MiniMax's Anthropic-compatible endpoints fail tool-use requests when
 # the fine-grained tool streaming beta is present.  Omit it so tool calls
@@ -501,9 +501,9 @@ def _common_betas_for_base_url(
     would otherwise include it after a subscription/endpoint rejects the beta.
     """
     betas = list(_COMMON_BETAS)
-    if _base_url_needs_context_1m_beta(base_url) and not drop_context_1m_beta:
-        betas.append(_CONTEXT_1M_BETA)
     if _requires_bearer_auth(base_url):
+        # MiniMax (bearer-auth) hosts its own models: strip both the
+        # tool-streaming beta and the 1M-context beta.
         _stripped = {_TOOL_STREAMING_BETA, _CONTEXT_1M_BETA}
         return [b for b in betas if b not in _stripped]
     if drop_context_1m_beta:
@@ -561,9 +561,18 @@ def build_anthropic_client(
             kwargs["default_query"] = {"api-version": "2025-04-15"}
         else:
             kwargs["base_url"] = normalized_base_url
+    # The 1M-context beta lives in ``_COMMON_BETAS`` (Bedrock and the fast-mode
+    # request path opt into it), but the client-level default header for native
+    # Anthropic / generic custom endpoints must NOT carry it: subscriptions
+    # without the long-context beta 400 on ordinary short auxiliary calls.
+    # Keep it only for endpoint families that still require it (Azure AI
+    # Foundry); MiniMax bearer endpoints strip it regardless.
+    _effective_drop_1m = drop_context_1m_beta or not _base_url_needs_context_1m_beta(
+        normalized_base_url
+    )
     common_betas = _common_betas_for_base_url(
         normalized_base_url,
-        drop_context_1m_beta=drop_context_1m_beta,
+        drop_context_1m_beta=_effective_drop_1m,
     )
 
     if _is_kimi_coding_endpoint(base_url):
@@ -645,7 +654,9 @@ def build_anthropic_bedrock_client(region: str):
     return _anthropic_sdk.AnthropicBedrock(
         aws_region=region,
         timeout=Timeout(timeout=900.0, connect=10.0),
-        default_headers={"anthropic-beta": ",".join([*_COMMON_BETAS, _CONTEXT_1M_BETA])},
+        default_headers={"anthropic-beta": ",".join(
+            dict.fromkeys([*_COMMON_BETAS, _CONTEXT_1M_BETA])
+        )},
     )
 
 
@@ -1951,21 +1962,28 @@ def build_anthropic_kwargs(
     # Opus 4.6 — Opus 4.7 and other models 400 on the speed parameter.
     # Only for native Anthropic endpoints — third-party providers would
     # reject the unknown beta header and speed parameter.
-    if (
-        fast_mode
-        and not _is_third_party_anthropic_endpoint(base_url)
-        and _supports_fast_mode(model)
-    ):
-        kwargs.setdefault("extra_body", {})["speed"] = "fast"
-        # Build extra_headers with ALL applicable betas (the per-request
-        # extra_headers override the client-level anthropic-beta header).
+    if fast_mode and not _is_third_party_anthropic_endpoint(base_url):
+        # Per-request extra_headers override the client-level anthropic-beta
+        # header, so the fast-mode path must re-include ALL applicable betas
+        # (interleaved-thinking, tool-streaming, and especially the 1M-context
+        # beta) or Bedrock/native silently drops back to a 200K cap.
+        # OAuth/subscription auth may not include the long-context beta, so
+        # drop the 1M beta on the OAuth fast-mode path (mirrors the client-
+        # level default).  Non-OAuth (API-key / Bedrock-style) fast-mode keeps
+        # it so the per-request extra_headers don't strip 1M context.
         betas = list(_common_betas_for_base_url(
             base_url,
-            drop_context_1m_beta=drop_context_1m_beta,
+            drop_context_1m_beta=drop_context_1m_beta or is_oauth,
         ))
         if is_oauth:
             betas.extend(_OAUTH_ONLY_BETAS)
-        betas.append(_FAST_MODE_BETA)
+        # ``speed: "fast"`` + the fast-mode beta are only valid on models that
+        # support Fast Mode (Opus 4.6).  Opus 4.7 and others 400 on the speed
+        # parameter, so gate just that part -- the beta headers above still
+        # apply so the per-request override doesn't strip 1M context.
+        if _supports_fast_mode(model):
+            kwargs.setdefault("extra_body", {})["speed"] = "fast"
+            betas.append(_FAST_MODE_BETA)
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
 
     return kwargs
