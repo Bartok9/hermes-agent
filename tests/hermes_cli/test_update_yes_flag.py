@@ -8,11 +8,41 @@ Covers:
      input() call) and the stash is applied automatically
 """
 
+import importlib
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.main import cmd_update
+
+
+@pytest.fixture(autouse=True)
+def _refresh_cmd_update_against_live_module():
+    """Rebind ``cmd_update`` to the *current* ``hermes_cli.main``.
+
+    Other tests in the suite (notably ``test_env_loader.py`` and
+    ``test_skills_subparser.py``) reload or delete ``hermes_cli.main`` from
+    ``sys.modules``. When that happens on the same xdist worker before we
+    run, our top-of-file ``from hermes_cli.main import cmd_update`` binding
+    ends up pointing at the *old* module object, whose ``__globals__`` still
+    reference the old, unpatched ``_restore_stashed_changes`` /
+    ``_stash_local_changes_if_needed``. ``patch("hermes_cli.main.X")`` then
+    patches the *new* module in ``sys.modules``, so every patch silently
+    becomes a no-op and the real autostash-restore runs (mock never called).
+
+    Refreshing the binding to the live module object makes these tests
+    immune to module-reload ordering within the worker. Mirrors the proven
+    fix in ``test_update_stale_dashboard.py``.
+    """
+    global cmd_update
+    live = sys.modules.get("hermes_cli.main")
+    if live is None:
+        live = importlib.import_module("hermes_cli.main")
+    cmd_update = live.cmd_update
+    yield
 
 
 def _make_run_side_effect(
