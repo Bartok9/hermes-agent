@@ -3742,6 +3742,13 @@ def call_llm(
         ):
             kwargs.pop("max_tokens", None)
             kwargs.pop("max_completion_tokens", None)
+            # When the provider rejects ``max_tokens`` as an unknown/renamed
+            # parameter (e.g. "Unknown parameter: max_tokens -- use
+            # max_completion_tokens"), retry under the renamed key rather than
+            # dropping the cap entirely.  The ZAI 1210 case wants the param
+            # gone outright, so leave it stripped there.
+            if not _is_zai_param_error:
+                kwargs["max_completion_tokens"] = max_tokens
             try:
                 return _validate_llm_response(
                     client.chat.completions.create(**kwargs), task)
@@ -4058,6 +4065,13 @@ async def async_call_llm(
         ):
             kwargs.pop("max_tokens", None)
             kwargs.pop("max_completion_tokens", None)
+            # When the provider rejects ``max_tokens`` as an unknown/renamed
+            # parameter (e.g. "Unknown parameter: max_tokens -- use
+            # max_completion_tokens"), retry under the renamed key rather than
+            # dropping the cap entirely.  The ZAI 1210 case wants the param
+            # gone outright, so leave it stripped there.
+            if not _is_zai_param_error:
+                kwargs["max_completion_tokens"] = max_tokens
             try:
                 return _validate_llm_response(
                     await client.chat.completions.create(**kwargs), task)
