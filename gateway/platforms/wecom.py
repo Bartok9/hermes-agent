@@ -1141,6 +1141,25 @@ class WeComAdapter(BasePlatformAdapter):
         if not local_path.is_absolute():
             local_path = (Path.cwd() / local_path).resolve()
 
+        # Prevent path traversal: reject paths that escape the Hermes working
+        # directory or HERMES_HOME.
+        # Fail-closed: if we cannot resolve the canonical paths, refuse to
+        # serve the file rather than silently bypassing the allowlist check.
+        try:
+            local_path = local_path.resolve()
+            cwd = str(Path.cwd().resolve())
+            hermes_home = os.environ.get("HERMES_HOME", cwd)
+        except Exception as exc:
+            raise ValueError(
+                f"Could not resolve path {local_path} for traversal check"
+            ) from exc
+
+        # Must be under cwd or under HERMES_HOME
+        local_path_str = str(local_path)
+        if not (local_path_str.startswith(cwd + os.sep) or
+                local_path_str.startswith(hermes_home + os.sep)):
+            raise ValueError(f"Path {local_path} is outside allowed directory")
+
         if not local_path.exists() or not local_path.is_file():
             raise FileNotFoundError(f"Media file not found: {local_path}")
 

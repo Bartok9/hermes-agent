@@ -387,6 +387,42 @@ class TestMediaHelpers:
         with pytest.raises(ValueError, match="placeholder was not replaced"):
             await adapter._load_outbound_media("<path>")
 
+    @pytest.mark.asyncio
+    async def test_load_outbound_media_rejects_path_outside_allowlist(self):
+        """Absolute paths outside cwd / HERMES_HOME must be rejected."""
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+
+        with pytest.raises(ValueError, match="outside allowed directory"):
+            await adapter._load_outbound_media("/etc/passwd")
+
+    @pytest.mark.asyncio
+    async def test_load_outbound_media_fails_closed_when_resolve_raises(self, monkeypatch):
+        """If canonical path resolution fails, the traversal guard must reject
+        the file (fail-closed) rather than silently falling through to the
+        exists()/is_file() checks, which do not enforce the allowlist."""
+        from pathlib import Path
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+
+        real_resolve = Path.resolve
+        calls = {"n": 0}
+
+        def flaky_resolve(self, *args, **kwargs):
+            # Let the pre-guard absolute-path normalization succeed, then fail
+            # inside the guard's resolve() step.
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise OSError("simulated resolve failure")
+            return real_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", flaky_resolve)
+
+        with pytest.raises(ValueError, match="for traversal check"):
+            await adapter._load_outbound_media("relative/whatever.png")
+
 
 class TestMediaUpload:
     @pytest.mark.asyncio
