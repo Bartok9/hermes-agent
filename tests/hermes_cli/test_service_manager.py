@@ -724,6 +724,38 @@ def test_s6_lifecycle_dispatches_to_s6_svc(
     assert flags == ["-u", "-d", "-t"]
 
 
+def test_s6_start_and_stop_cascade_to_log_subservice(
+    s6_scandir, fake_subprocess_run,
+) -> None:
+    """Issue #34480: log/down at reconcile time must not strand stdout.
+
+    When a profile is registered down, container_boot also marks
+    ``log/`` down. ``hermes gateway start`` (and the ``gateway run``
+    supervised redirect) must bring the logger up alongside the
+    producer or the gateway's stdout never reaches s6-log."""
+    mgr = S6ServiceManager(scandir=s6_scandir)
+    svc_dir = s6_scandir / "gateway-default"
+    svc_dir.mkdir()
+    log_dir = svc_dir / "log"
+    log_dir.mkdir()
+    (log_dir / "down").touch()
+
+    mgr.start("gateway-default")
+    mgr.stop("gateway-default")
+
+    svc_calls = [
+        (c[1], c[2])
+        for c in fake_subprocess_run
+        if c[0] == "s6-svc"
+    ]
+    assert svc_calls == [
+        ("-u", str(svc_dir)),
+        ("-u", str(log_dir)),
+        ("-d", str(svc_dir)),
+        ("-d", str(log_dir)),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle errors — friendly messages, not raw CalledProcessError
 # ---------------------------------------------------------------------------
