@@ -537,6 +537,7 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
+    catchup: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -581,6 +582,15 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        catchup: When True and the gateway was down long enough for a scheduled
+                run to miss its grace window, execute the missed run immediately
+                on the next scheduler tick instead of silently fast-forwarding to
+                the next scheduled time.  Defaults to False (existing behaviour).
+                Only one catch-up run is emitted per missed period (the most
+                recent overdue run fires once, then the schedule resumes normally).
+                Useful for critical recurring jobs (backups, health-checks, daily
+                digests) where a missed run should be compensated rather than
+                silently skipped.  One-shot jobs are unaffected by this flag.
 
     Returns:
         The created job dict
@@ -615,6 +625,7 @@ def create_job(
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
+    normalized_catchup = bool(catchup)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -668,6 +679,7 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        "catchup": normalized_catchup,
     }
 
     jobs = load_jobs()
@@ -747,6 +759,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
     for i, job in enumerate(jobs):
         if job["id"] != job_id:
             continue
+
+        # Normalize catchup flag if present in updates.
+        if "catchup" in updates:
+            updates["catchup"] = bool(updates["catchup"])
 
         # Validate / normalize workdir if present in updates.  Empty string or
         # None both mean "clear the field" (restore old behaviour).
@@ -1035,14 +1051,36 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             kind = schedule.get("kind")
 
             # For recurring jobs, check if the scheduled time is stale
-            # (gateway was down and missed the window). Fast-forward to
-            # the next future occurrence instead of firing a stale run.
+            # (gateway was down and missed the window). Default behaviour:
+            # fast-forward to the next future occurrence instead of firing
+            # a stale run.  When the job has ``catchup=True``, execute the
+            # missed run immediately once (single catch-up) and then let the
+            # schedule resume normally on the next tick.
             grace = _compute_grace_seconds(schedule)
             if kind in {"cron", "interval"} and (now - next_run_dt).total_seconds() > grace:
                 # Job is past its catch-up grace window — this is a stale missed run.
                 # Grace scales with schedule period: daily=2h, hourly=30m, 10min=5m.
                 new_next = compute_next_run(schedule, now.isoformat())
-                if new_next:
+                if job.get("catchup", False):
+                    # Catchup enabled: fire the missed run once, then advance
+                    # next_run_at so the scheduler doesn't re-fire on the
+                    # same stale slot on the following tick.
+                    logger.warning(
+                        "Job '%s' missed its scheduled time (%s, grace=%ds). "
+                        "Catchup enabled — executing now.",
+                        job.get("name", job["id"]),
+                        next_run,
+                        grace,
+                    )
+                    if new_next:
+                        for rj in raw_jobs:
+                            if rj["id"] == job["id"]:
+                                rj["next_run_at"] = new_next
+                                needs_save = True
+                                break
+                    due.append(job)
+                    continue  # Job already appended above; skip the fallthrough append
+                elif new_next:
                     logger.info(
                         "Job '%s' missed its scheduled time (%s, grace=%ds). "
                         "Fast-forwarding to next run: %s",
@@ -1058,6 +1096,10 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             needs_save = True
                             break
                     continue  # Skip this run
+                # If new_next is None (no computable next run for this stale
+                # recurring job), deliberately fall through to due.append(job)
+                # below so the run is surfaced to execution/mark_job_run and
+                # the recurring schedule error is not silently swallowed.
 
             due.append(job)
 

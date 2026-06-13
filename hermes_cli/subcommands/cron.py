@@ -67,6 +67,17 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         ),
     )
     cron_create.add_argument(
+        "--catchup",
+        dest="catchup",
+        action="store_true",
+        default=False,
+        help=(
+            "For recurring jobs: if a scheduled run is missed (gateway down, "
+            "scheduler busy), execute the missed run once on the next tick "
+            "instead of silently fast-forwarding to the next occurrence."
+        ),
+    )
+    cron_create.add_argument(
         "--workdir",
         help="Absolute path for the job to run from. Injects AGENTS.md / CLAUDE.md / .cursorrules from that directory and uses it as the cwd for terminal/file/code_exec tools. Omit to preserve old behaviour (no project context files).",
     )
@@ -129,6 +140,24 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         action="store_const",
         const=False,
         help="Disable no-agent mode on this job (reverts to LLM-driven execution).",
+    )
+    cron_edit.add_argument(
+        "--catchup",
+        dest="catchup",
+        action="store_const",
+        const=True,
+        default=None,
+        help=(
+            "Enable catchup on this recurring job: a missed run fires once on "
+            "the next tick instead of being skipped."
+        ),
+    )
+    cron_edit.add_argument(
+        "--no-catchup",
+        dest="catchup",
+        action="store_const",
+        const=False,
+        help="Disable catchup on this job (missed runs fast-forward, the default).",
     )
     cron_edit.add_argument(
         "--workdir",

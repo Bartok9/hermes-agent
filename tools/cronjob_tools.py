@@ -459,6 +459,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["enabled_toolsets"] = job["enabled_toolsets"]
     if job.get("workdir"):
         result["workdir"] = job["workdir"]
+    if job.get("catchup"):
+        result["catchup"] = True
     return result
 
 
@@ -482,6 +484,7 @@ def cronjob(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
+    catchup: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -548,6 +551,7 @@ def cronjob(
                 enabled_toolsets=enabled_toolsets or None,
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
+                catchup=bool(catchup) if catchup is not None else False,
             )
             return json.dumps(
                 {
@@ -695,6 +699,8 @@ def cronjob(
                             success=False,
                         )
                 updates["no_agent"] = target_no_agent
+            if catchup is not None:
+                updates["catchup"] = bool(catchup)
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -834,6 +840,20 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "string",
                 "description": "Optional absolute path to run the job from. When set, AGENTS.md / CLAUDE.md / .cursorrules from that directory are injected into the system prompt, and the terminal/file/code_exec tools use it as their working directory — useful for running a job inside a specific project repo. Must be an absolute path that exists. When unset (default), preserves the original behaviour: no project context files, tools use the scheduler's cwd. On update, pass an empty string to clear. Jobs with workdir run sequentially (not parallel) to keep per-job directories isolated."
             },
+            "catchup": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Default: False. When True, a recurring job that missed its scheduled run "
+                    "(because the gateway was down or the scheduler was blocked) will execute "
+                    "immediately on the next scheduler tick instead of silently fast-forwarding "
+                    "to the next future occurrence. Exactly one catch-up run fires per missed "
+                    "period — not one per skipped occurrence — then the normal schedule resumes. "
+                    "Useful for critical recurring jobs (backups, health-checks, daily digests) "
+                    "where a missed run should be compensated. Leave False (default) for jobs "
+                    "where running late makes no sense (e.g. \"send morning briefing\")."
+                ),
+            },
         },
         "required": ["action"]
     }
@@ -889,6 +909,7 @@ registry.register(
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
         no_agent=args.get("no_agent"),
+        catchup=args.get("catchup"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,

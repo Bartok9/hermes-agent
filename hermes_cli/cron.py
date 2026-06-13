@@ -219,6 +219,7 @@ def cron_create(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", False) or None,
+        catchup=getattr(args, "catchup", False) or None,
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -233,6 +234,8 @@ def cron_create(args):
         print(f"  Script: {job_data['script']}")
     if job_data.get("no_agent"):
         print("  Mode: no-agent (script stdout delivered directly)")
+    if job_data.get("catchup"):
+        print("  Catchup: enabled (missed runs fire once)")
     if job_data.get("workdir"):
         print(f"  Workdir: {job_data['workdir']}")
     print(f"  Next run: {result['next_run_at']}")
@@ -281,6 +284,7 @@ def cron_edit(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", None),
+        catchup=getattr(args, "catchup", None),
     )
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -298,6 +302,8 @@ def cron_edit(args):
         print(f"  Script: {updated['script']}")
     if updated.get("no_agent"):
         print("  Mode: no-agent (script stdout delivered directly)")
+    if updated.get("catchup"):
+        print("  Catchup: enabled (missed runs fire once)")
     if updated.get("workdir"):
         print(f"  Workdir: {updated['workdir']}")
     return 0
