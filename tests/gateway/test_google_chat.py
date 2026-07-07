@@ -139,6 +139,40 @@ from plugins.platforms.google_chat.adapter import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _force_google_chat_available():
+    """Keep GOOGLE_CHAT_AVAILABLE True on every loaded adapter copy.
+
+    The plugin loader imports the bundled adapter a SECOND time under a
+    synthetic namespace (``hermes_plugins.google_chat_platform.adapter``) —
+    a different module object than the ``plugins.platforms.google_chat.adapter``
+    copy this module shims True at import (line ~125). That synthetic copy
+    reflects whether the real google libs are importable, which is False in
+    CI. Under ``-n auto`` a sibling test in the same worker can trigger plugin
+    discovery (importing the synthetic copy with GOOGLE_CHAT_AVAILABLE=False)
+    BEFORE this module's google mocks are installed; the stale copy is then
+    cached and re-discovery won't re-exec it. Its ``check_fn``
+    (``_check_for_registry``, gated on GOOGLE_CHAT_AVAILABLE) consequently
+    returns False, so ``load_gateway_config()`` silently skips the platform
+    and ``cfg.platforms[Platform.GOOGLE_CHAT]`` KeyErrors.
+
+    Forcing the flag True on EVERY loaded google_chat adapter copy before each
+    test makes enablement independent of which copy discovery imported and of
+    cross-module import ordering. (This module already asserts the libs are
+    "available" via its module-level shim, so this is consistent with intent.)
+    """
+    import sys as _sys
+
+    for _name, _mod in list(_sys.modules.items()):
+        if (
+            "google_chat" in _name
+            and _name.endswith("adapter")
+            and hasattr(_mod, "GOOGLE_CHAT_AVAILABLE")
+        ):
+            _mod.GOOGLE_CHAT_AVAILABLE = True
+    yield
+
+
 def _base_config(**extra):
     cfg = PlatformConfig(enabled=True)
     cfg.extra.update({
