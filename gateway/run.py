@@ -636,7 +636,8 @@ def _auto_continue_freshness_window() -> float:
     out).  Kept here so existing call sites and test patches importing it
     from ``gateway.run`` continue to work.
     """
-    from gateway.session import auto_continue_freshness_window
+    from gateway.agent_usage import project_agent_usage
+from gateway.session import auto_continue_freshness_window
     return auto_continue_freshness_window()
 
 
@@ -18858,17 +18859,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             final_response = result.get("final_response")
 
             # Extract actual token counts from the agent instance used for this run
-            _last_prompt_toks = 0
-            _input_toks = 0
-            _output_toks = 0
-            _context_length = 0
             _agent = agent_holder[0]
-            if _agent and hasattr(_agent, "context_compressor"):
-                _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
-                _input_toks = getattr(_agent, "session_prompt_tokens", 0)
-                _output_toks = getattr(_agent, "session_completion_tokens", 0)
-                _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
-            _resolved_model = getattr(_agent, "model", None) if _agent else None
+            _usage = project_agent_usage(_agent)
+            _last_prompt_toks = _usage["last_prompt_tokens"]
+            _input_toks = _usage["input_tokens"]
+            _output_toks = _usage["output_tokens"]
+            _context_length = _usage["context_length"]
+            _cache_read_toks = _usage["cache_read_tokens"]
+            _cache_write_toks = _usage["cache_write_tokens"]
+            _estimated_cost_usd = _usage["estimated_cost_usd"]
+            _cost_status = _usage["cost_status"]
+            _cost_source = _usage["cost_source"]
+            _resolved_model = _usage["model"]
 
             # Sync session_id immediately after run_conversation(). Compression
             # can rotate before a follow-up model call fails; the failure return
@@ -18997,6 +18999,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
+                    "cache_read_tokens": _cache_read_toks,
+                    "cache_write_tokens": _cache_write_toks,
+                    "estimated_cost_usd": _estimated_cost_usd,
+                    "cost_status": _cost_status,
+                    "cost_source": _cost_source,
                 }
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
@@ -19106,6 +19113,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
                 "response_transformed": result.get("response_transformed", False),
+                "cache_read_tokens": _cache_read_toks,
+                "cache_write_tokens": _cache_write_toks,
+                "estimated_cost_usd": _estimated_cost_usd,
+                "cost_status": _cost_status,
+                "cost_source": _cost_source,
                 # Pass through the agent_persisted flag so the persistence block
                 # above can correctly determine whether the codex app-server path
                 # self-persisted (it didn't — see codex_runtime.py).  Default
