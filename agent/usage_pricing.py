@@ -452,9 +452,13 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     ): PricingEntry(
         input_cost_per_million=Decimal("0.14"),
         output_cost_per_million=Decimal("0.28"),
+        # Context cache hit pricing per official DeepSeek docs (input/miss is
+        # 0.14; cache hits are an order of magnitude cheaper). Without this,
+        # any session with cache_read_tokens used to estimate as unknown.
+        cache_read_cost_per_million=Decimal("0.014"),
         source="official_docs_snapshot",
         source_url="https://api-docs.deepseek.com/quick_start/pricing",
-        pricing_version="deepseek-pricing-2026-03-16",
+        pricing_version="deepseek-pricing-2026-07-10",
     ),
     (
         "deepseek",
@@ -936,24 +940,15 @@ def estimate_usage_cost(
         return CostResult(amount_usd=None, status="unknown", source=entry.source, label="n/a")
     if usage.output_tokens and entry.output_cost_per_million is None:
         return CostResult(amount_usd=None, status="unknown", source=entry.source, label="n/a")
-    if usage.cache_read_tokens:
-        if entry.cache_read_cost_per_million is None:
-            return CostResult(
-                amount_usd=None,
-                status="unknown",
-                source=entry.source,
-                label="n/a",
-                notes=("cache-read pricing unavailable for route",),
-            )
-    if usage.cache_write_tokens:
-        if entry.cache_write_cost_per_million is None:
-            return CostResult(
-                amount_usd=None,
-                status="unknown",
-                source=entry.source,
-                label="n/a",
-                notes=("cache-write pricing unavailable for route",),
-            )
+    # Missing *cache* rates used to force the entire estimate to unknown/$0
+    # even when input+output rates were known (#18304, deepseek-chat, and
+    # anything else with incomplete PricingEntry cache columns). Bill what we
+    # can (input/output) and note the incomplete cache portion instead of
+    # discarding the whole estimate.
+    if usage.cache_read_tokens and entry.cache_read_cost_per_million is None:
+        notes.append("cache-read pricing unavailable for route; input/output estimated only")
+    if usage.cache_write_tokens and entry.cache_write_cost_per_million is None:
+        notes.append("cache-write pricing unavailable for route; input/output estimated only")
 
     if entry.input_cost_per_million is not None:
         amount += Decimal(usage.input_tokens) * entry.input_cost_per_million / _ONE_MILLION

@@ -145,7 +145,8 @@ def test_estimate_usage_cost_marks_subscription_routes_included():
     assert float(result.amount_usd) == 0.0
 
 
-def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(monkeypatch):
+def test_estimate_usage_cost_partial_when_openrouter_cache_rate_missing(monkeypatch):
+    """Missing cache-read rate must not zero the whole estimate (#18304)."""
     monkeypatch.setattr(
         "agent.usage_pricing.fetch_model_metadata",
         lambda: {
@@ -165,7 +166,10 @@ def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(m
         base_url="https://openrouter.ai/api/v1",
     )
 
-    assert result.status == "unknown"
+    assert result.status == "estimated"
+    assert result.amount_usd is not None
+    assert float(result.amount_usd) > 0
+    assert any("cache-read pricing unavailable" in n for n in result.notes)
 
 
 def test_custom_endpoint_models_api_pricing_is_supported(monkeypatch):
@@ -322,3 +326,52 @@ def test_bedrock_claude_cached_session_estimates_cost_not_unknown():
     )
     assert result.status == "estimated"
     assert result.amount_usd is not None
+
+
+def test_estimate_usage_cost_partial_when_cache_rate_missing():
+    """Input/output still bill when cache rates are absent (#18304)."""
+    from agent.usage_pricing import CanonicalUsage, PricingEntry, estimate_usage_cost
+    from unittest.mock import patch
+    from decimal import Decimal
+
+    entry = PricingEntry(
+        input_cost_per_million=Decimal("1.0"),
+        output_cost_per_million=Decimal("2.0"),
+        cache_read_cost_per_million=None,
+        cache_write_cost_per_million=None,
+        source="official_docs_snapshot",
+        pricing_version="test",
+    )
+    usage = CanonicalUsage(
+        input_tokens=1_000_000,
+        output_tokens=500_000,
+        cache_read_tokens=2_000_000,
+        cache_write_tokens=100_000,
+    )
+    with patch("agent.usage_pricing.get_pricing_entry", return_value=entry):
+        result = estimate_usage_cost("toy-model", usage, provider="deepseek")
+    # 1.0 * 1M input + 2.0 * 0.5M output = $2.00; cache ignored not zeroed
+    assert result.status == "estimated"
+    assert result.amount_usd is not None
+    assert float(result.amount_usd) == 2.0
+    assert any("cache-read pricing unavailable" in n for n in result.notes)
+    assert any("cache-write pricing unavailable" in n for n in result.notes)
+
+
+def test_deepseek_chat_cached_session_estimates_with_cache_rate():
+    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+
+    usage = CanonicalUsage(
+        input_tokens=1000,
+        output_tokens=500,
+        cache_read_tokens=10_000,
+    )
+    result = estimate_usage_cost(
+        "deepseek-chat",
+        usage,
+        provider="deepseek",
+        base_url="https://api.deepseek.com",
+    )
+    assert result.status == "estimated"
+    assert result.amount_usd is not None
+    assert float(result.amount_usd) > 0
