@@ -5513,3 +5513,27 @@ class TestGetMessagesPagination:
         self._seed(db, n=5)
         rows = db.get_messages("s1", offset=3)
         assert [m["content"] for m in rows] == ["msg-3", "msg-4"]
+
+
+class TestMessageTokenCount:
+    """messages.token_count was orphaned since the schema landed (#47201)."""
+
+    def test_append_message_persists_token_count(self, db):
+        db.create_session("s1", source="cli")
+        mid = db.append_message("s1", role="assistant", content="hi", token_count=123)
+        rows = db.get_messages("s1")
+        assert any(r.get("id") == mid and r.get("token_count") == 123 for r in rows)
+
+    def test_append_message_without_token_count_defaults_to_null(self, db):
+        db.create_session("s1", source="cli")
+        mid = db.append_message("s1", role="user", content="hi")
+        rows = db.get_messages("s1")
+        match = next(r for r in rows if r.get("id") == mid)
+        assert match.get("token_count") is None
+
+    def test_append_message_token_count_zero_is_persisted(self, db):
+        db.create_session("s1", source="cli")
+        mid = db.append_message("s1", role="assistant", content="hi", token_count=0)
+        rows = db.get_messages("s1")
+        match = next(r for r in rows if r.get("id") == mid)
+        assert match.get("token_count") == 0

@@ -2130,6 +2130,15 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+                    # Per-message DB column messages.token_count (#47201 / #58719).
+                    # Prefer provider total_tokens; fall back to prompt+completion.
+                    try:
+                        _turn_total = int(total_tokens or 0)
+                    except (TypeError, ValueError):
+                        _turn_total = 0
+                    if _turn_total <= 0:
+                        _turn_total = int(prompt_tokens or 0) + int(completion_tokens or 0)
+                    agent._last_turn_token_count = _turn_total if _turn_total > 0 else None
 
                     # Log API call details for debugging/observability
                     _cache_pct = ""
@@ -4608,6 +4617,8 @@ def run_conversation(
                 )
 
                 assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
+                if getattr(agent, "_last_turn_token_count", None) is not None:
+                    assistant_msg["token_count"] = agent._last_turn_token_count
                 
                 # If this turn has both content AND tool_calls, capture the content
                 # as a fallback final response. Common pattern: model delivers its
@@ -5120,6 +5131,8 @@ def run_conversation(
                 final_response = agent._strip_think_blocks(final_response).strip()
                 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
+                if getattr(agent, "_last_turn_token_count", None) is not None:
+                    final_msg["token_count"] = agent._last_turn_token_count
 
                 # Pop thinking-only prefill and empty-response retry
                 # scaffolding before appending either a final response or a
