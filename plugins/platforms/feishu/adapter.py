@@ -3249,14 +3249,30 @@ class FeishuAdapter(BasePlatformAdapter):
             if hint:
                 text = f"{hint}\n\n{text}" if text else hint
 
+        # root_id → thread_id is intentional topic routing (a79b0ec); preserve it.
         thread_id = getattr(message, "thread_id", None) or getattr(message, "root_id", None) or None
+        # Quoted replies outside threads populate message.quote, not parent_id.
+        quote = getattr(message, "quote", None) or {}
+        if not isinstance(quote, dict):
+            quote = {
+                "message_id": getattr(quote, "message_id", None),
+                "id": getattr(quote, "id", None),
+                "text": getattr(quote, "text", None),
+            }
+        quote_id = quote.get("message_id") or quote.get("id") or None
+        quote_text = quote.get("text") or None
         reply_to_message_id = (
             getattr(message, "parent_id", None)
             or getattr(message, "upper_message_id", None)
             or getattr(message, "root_id", None)
+            or quote_id
             or None
         )
-        reply_to_text = await self._fetch_message_text(reply_to_message_id) if reply_to_message_id else None
+        fetched_reply_text = (
+            await self._fetch_message_text(reply_to_message_id) if reply_to_message_id else None
+        )
+        # Keep literal quote text when lookup fails (_fetch_message_text returns None).
+        reply_to_text = fetched_reply_text if fetched_reply_text is not None else quote_text
 
         sender_primary = (
             getattr(sender_id, "open_id", None)
