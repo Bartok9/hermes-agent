@@ -160,3 +160,27 @@ class TestTurnLevelTimeInjection:
             assert f"Timezone: {tz_display}" in time_ctx
         else:
             assert "Timezone:" not in time_ctx
+
+    def test_shared_dt_pins_time_and_offset(self):
+        """Optional dt= keeps Current time and Timezone offset on one instant."""
+        from datetime import datetime, timezone as dt_timezone
+        from hermes_time import format_current_time_context, get_timezone_display, reset_cache
+        from zoneinfo import ZoneInfo
+        import hermes_time as ht
+
+        reset_cache()
+        fixed = datetime(2026, 3, 8, 1, 30, tzinfo=ZoneInfo("America/New_York"))
+        # Force configured timezone so display is non-empty.
+        ht._cached_tz = ZoneInfo("America/New_York")
+        ht._cached_tz_name = "America/New_York"
+        ht._cache_resolved = True
+        try:
+            ctx = format_current_time_context(dt=fixed)
+            display = get_timezone_display(dt=fixed)
+            assert "Current time:" in ctx
+            assert "01:30" in ctx or "1:30" in ctx
+            assert f"Timezone: {display}" in ctx
+            # EST in early March pre-spring-forward week: UTC-05:00
+            assert "UTC-05:00" in display
+        finally:
+            reset_cache()

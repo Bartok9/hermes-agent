@@ -139,17 +139,29 @@ def get_timezone_name() -> str:
     return _cached_tz_name or ""
 
 
-def get_timezone_display() -> str:
+def get_timezone_display(dt: Optional[datetime] = None) -> str:
     """Return 'IANA (UTC±HH:MM)' for display, aligned with PR #10061 format.
 
     Examples: 'Asia/Hong_Kong (UTC+08:00)', 'America/New_York (UTC-04:00)'.
     Returns empty string if no timezone is configured.
+
+    Pass *dt* to pin the UTC offset to a specific wall-clock instant (DST
+    boundaries). When omitted, uses ``now()`` so callers that also format
+    the current time can share one datetime.
     """
     tz = get_timezone()
     if tz is None:
         return ""
     name = get_timezone_name()
-    now_dt = datetime.now(tz)
+    now_dt = dt if dt is not None else now()
+    # Ensure offset is evaluated in the configured zone when possible.
+    if now_dt.tzinfo is None and tz is not None:
+        now_dt = now_dt.replace(tzinfo=tz)
+    elif tz is not None:
+        try:
+            now_dt = now_dt.astimezone(tz)
+        except Exception:
+            pass
     offset = now_dt.utcoffset()
     if offset is None:
         return name
@@ -160,7 +172,7 @@ def get_timezone_display() -> str:
     return f"{name} (UTC{sign}{hours:02d}:{minutes:02d})"
 
 
-def format_current_time_context() -> str:
+def format_current_time_context(dt: Optional[datetime] = None) -> str:
     """Format a compact 'Current time + Timezone' block for per-turn injection.
 
     Designed for user-message injection (not system prompt) to preserve
@@ -168,10 +180,14 @@ def format_current_time_context() -> str:
 
         Current time: Tuesday, July 15, 2026 05:30 PM
         Timezone: Asia/Hong_Kong (UTC+08:00)
+
+    Pass *dt* to pin both the wall-clock line and the timezone offset to the
+    same instant (avoids a rare DST-boundary mismatch if the two helpers
+    each call ``now()`` independently).
     """
-    current = now()
+    current = dt if dt is not None else now()
     lines = [f"Current time: {current.strftime('%A, %B %d, %Y %I:%M %p').lstrip('0')}"]
-    tz_display = get_timezone_display()
+    tz_display = get_timezone_display(dt=current)
     if tz_display:
         lines.append(f"Timezone: {tz_display}")
     return "\n".join(lines)
