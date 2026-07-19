@@ -169,12 +169,32 @@ def walk_files(directory: str, depth: int = 0) -> Iterator[Tuple[str, float]]:
 # ──────────────────────────────────────────────────────────────────────
 
 _CREDENTIAL_PATTERNS = [
+    # OpenAI / OpenRouter-style keys
     re.compile(r"\bsk-[a-zA-Z0-9]{20,}\b"),
+    re.compile(r"\bsk-or-v1-[a-zA-Z0-9]{20,}\b"),
+    # JWTs (prefix) + PEM private keys
     re.compile(r"\beyJ[a-zA-Z0-9_-]{20,}\b"),
+    re.compile(
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
+    ),
+    # Supabase / cloud
     re.compile(r"\bsb_(?:publishable|secret)_[a-zA-Z0-9_-]+\b"),
     re.compile(r"password\s*[=:]\s*[\"']?[^\s\"']{8,}[\"']?", re.IGNORECASE),
-    re.compile(r"\bghp_[a-zA-Z0-9]{36}\b"),   # GitHub tokens
-    re.compile(r"\bxoxb-[a-zA-Z0-9_-]{50,}\b"),  # Slack tokens
+    # GitHub PATs (classic + fine-grained)
+    re.compile(r"\bghp_[a-zA-Z0-9]{36}\b"),
+    re.compile(r"\bgithub_pat_[a-zA-Z0-9_]{20,}\b"),
+    # Slack + Telegram + Discord-ish
+    re.compile(r"\bxox[baprs]-[a-zA-Z0-9-]{10,}\b"),
+    re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b"),  # Telegram bot tokens
+    # Anthropic / Google style markers (prefix-safe; avoid matching plain words)
+    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"),
+]
+
+# Generic PII shapes only — NEVER hardcode real names, phones, or household IDs.
+# (Private Bartok-Brain privacy.mjs dlists must not ship in public forks.)
+_PII_PATTERNS = [
+    re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    re.compile(r"\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b"),
 ]
 
 
@@ -182,6 +202,18 @@ def redact_credentials(text: str) -> str:
     for pat in _CREDENTIAL_PATTERNS:
         text = pat.sub("[CREDENTIAL]", text)
     return text
+
+
+def redact_pii(text: str) -> str:
+    """Strip generic email/phone shapes. No named-person denylist."""
+    for pat in _PII_PATTERNS:
+        text = pat.sub("[REDACTED]", text)
+    return text
+
+
+def redact_for_graph(text: str) -> str:
+    """Full scrub before extraction — credentials then generic PII."""
+    return redact_pii(redact_credentials(text))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -493,7 +525,7 @@ _HTML_TITLE_RE = re.compile(r"<(?:title|h1)[^>]*>([^<]{3,80})<", re.IGNORECASE)
 
 def extract_knowledge(content: str, source: str, graph: KnowledgeGraph, weight: float = 1.0, file_mtime: Optional[float] = None) -> None:
     """Extract concepts from prose (markdown, text). Direct port of extractKnowledge."""
-    clean = redact_credentials(content)
+    clean = redact_for_graph(content)
 
     headers = _HEADER_RE.findall(clean)
     bold_items = [b.strip() for b in _BOLD_RE.findall(clean)]
@@ -666,7 +698,7 @@ def _extract_json(content: str, source: str, graph: KnowledgeGraph, weight: floa
             if isinstance(item, dict):
                 label = (item.get("title") or item.get("name") or "")[:60]
                 if len(label) > 3:
-                    graph.add_node(redact_credentials(label), "concept", source, weight, last_seen_ts=file_mtime)
+                    graph.add_node(redact_for_graph(label), "concept", source, weight, last_seen_ts=file_mtime)
     except (json.JSONDecodeError, TypeError):
         pass
 

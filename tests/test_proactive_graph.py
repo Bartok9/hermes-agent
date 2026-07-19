@@ -18,6 +18,8 @@ from hermes_cli.bartokgraph import (
     extract_knowledge,
     extract_code,
     redact_credentials,
+    redact_for_graph,
+    redact_pii,
 )
 from hermes_cli.bartokgraph_adapter import (
     BartokGraphAdapter,
@@ -75,6 +77,29 @@ def test_redacts_jwt():
 def test_leaves_normal_text():
     text = "The soil carbon project is going well."
     assert redact_credentials(text) == text
+
+
+def test_redacts_github_pat_and_telegram_bot_token():
+    text = "ghp_abcdefghijklmnopqrstuvwxyz0123456789 and 1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+    out = redact_credentials(text)
+    assert "ghp_" not in out
+    assert "AAHdqTcv" not in out
+    assert out.count("[CREDENTIAL]") >= 2
+
+
+def test_redact_pii_generic_email_phone():
+    text = "contact demo.user@example.com or +1 (555) 010-9911"
+    out = redact_pii(text)
+    assert "example.com" not in out
+    assert "555" not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_for_graph_combines_credential_and_pii():
+    text = "key=sk-abcdefghijklmnopqrstuv and demo.user@example.com"
+    out = redact_for_graph(text)
+    assert "sk-" not in out
+    assert "example.com" not in out
 
 
 # ──────────────────────────────────────────────────────────────────────
