@@ -118,7 +118,7 @@ python -m hermes_cli.bartokgraph build ~/workspace
 python -m hermes_cli.bartokgraph build ~/workspace --all
 
 # Build for a specific person (requires bartokgraph-config.json)
-python -m hermes_cli.bartokgraph build ~/workspace --person alice
+python -m hermes_cli.bartokgraph build ~/workspace --person teammate
 
 # Query
 python -m hermes_cli.bartokgraph query graph.json "regenerative agriculture"

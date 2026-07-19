@@ -25,7 +25,7 @@ Usage (CLI)::
 
     python -m hermes_cli.bartokgraph build ~/workspace
     python -m hermes_cli.bartokgraph build ~/workspace --layer code
-    python -m hermes_cli.bartokgraph build ~/workspace --person alice
+    python -m hermes_cli.bartokgraph build ~/workspace --person teammate
     python -m hermes_cli.bartokgraph build ~/workspace --all
     python -m hermes_cli.bartokgraph query graph.json "regenerative agriculture"
     python -m hermes_cli.bartokgraph report graph.json

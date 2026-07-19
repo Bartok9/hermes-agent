@@ -41,7 +41,7 @@ def _make_graph_json_five_nodes_30d() -> dict:
                 "node_type": "research",
             },
             {
-                "content": "delta alice introduced kenya",
+                "content": "delta field-partner introduced kenya",
                 "weight": 0.85,
                 "last_seen_ts": now - 9 * day,
                 "node_type": "person_link",
