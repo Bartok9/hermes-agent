@@ -102,6 +102,9 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
     # Answers /p/<profile>/... on the default listener for a served secondary (shared_ingress).
     serves_profile_prefix: bool = True
 
+    # Same single-shot HTTP ingress as generic webhook (#69145 / #66617).
+    supports_async_delivery: bool = False
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.MSGRAPH_WEBHOOK)
         extra = config.extra or {}
