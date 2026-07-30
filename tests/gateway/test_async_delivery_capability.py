@@ -155,7 +155,7 @@ class TestStatelessChannelForcesSyncDelegation:
 
 class TestAdapterCapabilityFlag:
 
-
+    def test_webhook_class_flag_disables_async_delivery(self):
         from gateway.platforms.webhook import WebhookAdapter
 
         assert WebhookAdapter.supports_async_delivery is False
