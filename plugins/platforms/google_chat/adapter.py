@@ -2856,18 +2856,26 @@ def _validate_config(config: PlatformConfig) -> bool:
 
 
 def _check_for_registry() -> bool:
-    """``check_fn`` for the platform registry pass — stricter than the
-    deps-only ``check_google_chat_requirements``.
+    """``check_fn`` for the platform registry pass.
 
     The registry pass at ``gateway/config.py:_apply_env_overrides`` adds
     the platform to ``cfg.platforms`` whenever ``check_fn`` returns True.
-    For backward compat with the pre-plugin behavior, we ALSO require
-    the minimum Pub/Sub env vars so an unconfigured user doesn't
-    accidentally see ``google_chat`` enabled. This matches the legacy
-    ``if gc_project and gc_subscription`` gate.
+    Enablement is driven purely by the minimum Pub/Sub env vars so an
+    unconfigured user doesn't accidentally see ``google_chat`` enabled.
+    This matches the legacy ``if gc_project and gc_subscription`` gate.
+
+    Note: we intentionally do NOT gate on ``check_google_chat_requirements()``
+    (the optional ``google-cloud-pubsub`` SDK) here. Enablement reflects
+    *configuration intent* — whether the user pointed Hermes at a Pub/Sub
+    project + subscription. The missing-dependency case is surfaced with a
+    clear, actionable error at adapter construction/connect time (see
+    ``GoogleChatAdapter.__init__`` / ``connect``), not by silently dropping a
+    configured platform from ``cfg.platforms``. Gating enablement on an
+    import-time module flag also made the result depend on plugin-loader
+    import ordering (the loader imports the adapter under a separate module
+    name from the one tests patch), producing flaky enablement under
+    parallel test execution.
     """
-    if not check_google_chat_requirements():
-        return False
     project = (
         os.getenv("GOOGLE_CHAT_PROJECT_ID")
         or os.getenv("GOOGLE_CLOUD_PROJECT")

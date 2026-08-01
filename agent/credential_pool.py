@@ -1403,13 +1403,36 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
 
     # Resolve API keys using the canonical precedence: os.environ first, then
     # ~/.hermes/.env (see hermes_cli.config.get_env_value). A live shell export
-    # must win over a stale .env value so an operator can override a persisted
-    # key for the current process without editing the file. This matches the
-    # auth-side resolver (_resolve_api_key_provider_secret) so the pool and the
-    # auth path never disagree about which key is active.
+    # wins over a .env value so an operator can override a persisted key for
+    # the current process without editing the file. This matches the auth-side
+    # resolver (_resolve_api_key_provider_secret) so the pool and the auth
+    # path never disagree about which key is active.
     def _get_env_value_stripped(key: str) -> str:
         val = get_env_value(key) or ""
         return val.strip()
+
+    # OpenRouter-only resolver: ~/.hermes/.env wins over os.environ.
+    #
+    # Regression #18254 was specific to OpenRouter key rotation: after the
+    # user rotated their OpenRouter key and wrote the fresh value into
+    # ~/.hermes/.env, a *stale* OPENROUTER_API_KEY still exported in the
+    # parent shell (or inherited into a long-lived process's os.environ)
+    # shadowed it. Seeding the pool from the stale os.environ value silently
+    # persisted it into auth.json and produced unrecoverable 401s. For this
+    # one provider the freshly-edited .env file is authoritative.
+    #
+    # When ~/.hermes/.env does NOT define the key (Docker / K8s / systemd
+    # deployments that inject the key at runtime), fall back to os.environ so
+    # production runtime-injected keys still seed the pool.
+    def _get_dotenv_first_stripped(key: str) -> str:
+        try:
+            from hermes_cli.config import load_env as _load_env
+            dotenv_val = (_load_env() or {}).get(key)
+        except Exception:
+            dotenv_val = None
+        if dotenv_val is not None and str(dotenv_val).strip():
+            return str(dotenv_val).strip()
+        return (os.environ.get(key) or "").strip()
 
     # Honour user suppression — `hermes auth remove <provider> <N>` for an
     # env-seeded credential marks the env:<VAR> source as suppressed so it
@@ -1422,8 +1445,9 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
         def _is_source_suppressed(_p, _s):  # type: ignore[misc]
             return False
     if provider == "openrouter":
-        # os.environ wins, then ~/.hermes/.env (see _get_env_value_stripped).
-        token = _get_env_value_stripped("OPENROUTER_API_KEY")
+        # ~/.hermes/.env wins over os.environ for OpenRouter (regression
+        # #18254 — see _get_dotenv_first_stripped).
+        token = _get_dotenv_first_stripped("OPENROUTER_API_KEY")
         if token:
             source = "env:OPENROUTER_API_KEY"
             if _is_source_suppressed(provider, source):
