@@ -161,8 +161,10 @@ def register_source(
                     return False
         target = _SOURCES if scope is None else _SCOPED_SOURCES.setdefault(scope, {})
         target[name] = source
-        if scope is None:
-            _SOURCE_ORIGINS[name] = "builtin" if builtin else "plugin"
+        # Origin is tracked for both global and scoped registrations so
+        # list_plugin_sources() / post-discovery dotenv re-apply can see
+        # profile-isolated plugin backends (#64177 / ownership ledger).
+        _SOURCE_ORIGINS[name] = "builtin" if builtin else "plugin"
     return True
 
 
@@ -215,13 +217,23 @@ def list_sources(*, scope: Optional[str] = None) -> List[SecretSource]:
 
 
 def list_plugin_sources() -> List[SecretSource]:
-    """Return sources registered outside the bundled bootstrap set."""
+    """Return sources registered outside the bundled bootstrap set.
+
+    Includes profile-scoped plugin registrations (``scope=``) as well as
+    process-global ones.  Dedupes by source name preferring the scoped
+    entry when both exist.
+    """
     _ensure_builtin_sources()
-    return [
-        source
-        for name, source in _SOURCES.items()
-        if _SOURCE_ORIGINS.get(name) == "plugin"
-    ]
+    with _REGISTRY_LOCK:
+        by_name: Dict[str, SecretSource] = {}
+        for name, source in _SOURCES.items():
+            if _SOURCE_ORIGINS.get(name) == "plugin":
+                by_name[name] = source
+        for scoped in _SCOPED_SOURCES.values():
+            for name, source in scoped.items():
+                if _SOURCE_ORIGINS.get(name) == "plugin":
+                    by_name[name] = source
+        return list(by_name.values())
 
 
 def _ensure_builtin_sources() -> None:

@@ -2507,6 +2507,31 @@ class PluginManager:
             # The handles are authoritative for global registries, while the
             # manager-local containers are also reset to clear legacy/manual
             # state that predates the ledger.
+            #
+            # Platforms may be present only in ``_plugin_platform_names``
+            # (tests / pre-ledger bookkeeping) without a dispose handle —
+            # still drop them from the process-global registry on full unload
+            # so force-reload does not leave stale adapters (#64229).
+            if self._plugin_platform_names:
+                try:
+                    from gateway.platform_registry import platform_registry
+                except Exception:  # pragma: no cover - import defensive
+                    platform_registry = None  # type: ignore[assignment]
+                if platform_registry is not None:
+                    for name in list(self._plugin_platform_names):
+                        try:
+                            # Prefer the manager's profile scope, then fall back
+                            # to an unscoped drop for pre-ledger / test inserts.
+                            if not platform_registry.unregister(
+                                name, scope=self.scope_key
+                            ):
+                                platform_registry.unregister(name)
+                        except Exception:  # pragma: no cover - best-effort cleanup
+                            logger.debug(
+                                "Failed to unregister platform %s during unload",
+                                name,
+                                exc_info=_PLUGINS_DEBUG,
+                            )
             self._ownership_ledger.clear()
             self._plugins.clear()
             self._hooks.clear()
