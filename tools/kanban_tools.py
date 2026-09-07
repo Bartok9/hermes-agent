@@ -834,6 +834,9 @@ def _handle_create(args: dict, **kw) -> str:
             self_task = kb.get_task(conn, self_tid) if self_tid else None
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
+            else:
+                workspace_kind, workspace_path = kb.recommended_workspace_kind_for_board(
+                    args.get("board"))
         new_tid = kb.create_task(
             conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
             parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
