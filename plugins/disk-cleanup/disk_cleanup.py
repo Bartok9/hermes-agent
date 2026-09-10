@@ -124,6 +124,7 @@ _NEVER_TRACK_TOP_LEVEL = frozenset({
     "auth.json", "hermes-agent",
     # User-authored project trees — never sweep empty directories inside these (#75403).
     # User-authored and project trees — never auto-delete files inside these just because they happen to be
+<<<<<<< HEAD
     # named test_* or tmp_* (#75403, also #32164, #37721). ``workspace``, ``plans`` and ``home`` are the
     # per-profile user trees bootstrapped by ``profiles.py::_PROFILE_DIRS`` (#112859).
     "patches", "projects", "skins", "themes", "contributors",
@@ -131,6 +132,11 @@ _NEVER_TRACK_TOP_LEVEL = frozenset({
     # Kanban task attachments/workspaces have their own lifecycle; test_* staging files there are
     # not disposable (#114552).
     "kanban"})
+=======
+    # named test_* or tmp_* (#75403, also #32164, #37721).
+    "patches", "projects", "scripts", "skins", "themes", "contributors",
+    "profiles", "backups", "optional-skills"})
+>>>>>>> ff20fff701 (fix(plugins): never auto-delete test_* files under $HERMES_HOME/scripts)
 
 
 def _is_protected_dir(p: Path) -> bool:
