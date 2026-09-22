@@ -1032,6 +1032,8 @@ def nonretryable_client_error_result(
         _final_response = nonretryable_copy(
             classified, provider=provider, model=model, summary=_nonretryable_summary,
             prefix_suggestion=_prefix_suggestion,
+            fallback_route=getattr(agent, "_provider_fallback_route", None)
+            if getattr(agent, "_provider_fallback_active", False) else None,
         )
     result = _failed_turn_result(_final_response, messages, api_call_count, _nonretryable_summary)
     # Same verdict fields as the max-retries path: without them the UI descriptor
