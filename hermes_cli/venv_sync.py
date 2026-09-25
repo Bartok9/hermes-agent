@@ -228,7 +228,11 @@ def _pm_environment_python_if_foreign(root: Path) -> Path | None:
     python = venv_python(environment)
     if not python.is_file():
         return None
-    if python.resolve() == Path(sys.executable).resolve():
+    # uv/PM venvs often symlink bin/python to a shared base binary. Comparing
+    # resolved paths collapses bare runtime and env venv to the same file, so
+    # the re-exec never fires. Prefer env identity (sys.prefix) and the
+    # unresolved sys.executable path (still the venv shim when active).
+    if str(environment) == sys.prefix or Path(sys.executable) == python:
         return None
     return python
 
