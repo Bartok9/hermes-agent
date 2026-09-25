@@ -177,3 +177,47 @@ class TestCliContract:
 
         assert proc.returncode == 1
         assert json.loads(proc.stdout)["state"] == "failed"
+
+
+def test_prepare_launch_reexecs_pm_environment_without_git(tmp_path, monkeypatch):
+    """Generated PM workspaces have no .git; still hop onto the recorded venv."""
+    from pm.environments import install_key, venv_python
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    env_dir = tmp_path / "home" / "installs" / install_key(root) / "environments" / "gen1" / "venv"
+    python = venv_python(env_dir)
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    (env_dir / "pyvenv.cfg").write_text("home = /opt/python\n", encoding="utf-8")
+    facts = env_dir.parent.parent.parent / "facts.json"
+    facts.write_text(
+        json.dumps({"packages": {"venv": {"environment": str(env_dir.resolve())}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("HERMES_DISABLE_LAZY_INSTALLS", raising=False)
+    assert venv_sync.prepare_launch(root, []) == python.resolve()
+
+
+def test_prepare_launch_skips_pm_reexec_when_already_on_venv(tmp_path, monkeypatch):
+    from pm.environments import install_key, venv_python
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    env_dir = tmp_path / "home" / "installs" / install_key(root) / "environments" / "gen1" / "venv"
+    python = venv_python(env_dir)
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    (env_dir / "pyvenv.cfg").write_text("home = /opt/python\n", encoding="utf-8")
+    facts = env_dir.parent.parent.parent / "facts.json"
+    facts.write_text(
+        json.dumps({"packages": {"venv": {"environment": str(env_dir.resolve())}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("HERMES_DISABLE_LAZY_INSTALLS", raising=False)
+    assert venv_sync.prepare_launch(root, []) is None
