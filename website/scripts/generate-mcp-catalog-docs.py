@@ -585,8 +585,8 @@ def render_catalog_page(entries: List[Dict[str, Any]]) -> str:
     lines.append("")
     lines.append(
         "For the general MCP config shape (independent of the catalog), see the "
-        "[MCP Config Reference](/reference/mcp-config-reference). For the conceptual "
-        "overview, see [MCP (Model Context Protocol)](/user-guide/features/mcp)."
+        "[MCP Config Reference](./mcp-config-reference.md). For the conceptual "
+        "overview, see [MCP (Model Context Protocol)](../user-guide/features/mcp.md)."
     )
     lines.append("")
 
@@ -598,7 +598,7 @@ def render_catalog_page(entries: List[Dict[str, Any]]) -> str:
         lines.append("|------|-----------|------|--------|-------------|")
         for entry in entries:
             name = entry["name"]
-            link_target = f"/docs/user-guide/mcps/optional/{name}"
+            link_target = f"../user-guide/mcps/optional/{name}.md"
             transport_cell = entry["transport"]["type"]
             auth_cell = entry["auth"]["type"]
             source_cell = (
@@ -662,10 +662,12 @@ def render_catalog_page(entries: List[Dict[str, Any]]) -> str:
         "1. Add a directory under `optional-mcps/<name>/` containing a `manifest.yaml`."
     )
     lines.append(
-        "2. Use the existing entries (`optional-mcps/linear/manifest.yaml`, "
-        "`optional-mcps/n8n/manifest.yaml`) as templates. They cover the two "
-        "supported transports (HTTP with native MCP OAuth; stdio with git-clone "
-        "install)."
+        "2. Use an existing entry such as "
+        "`optional-mcps/n8n-official/manifest.yaml` or "
+        "`optional-mcps/stripe/manifest.yaml` as a template. Current catalog "
+        "entries use HTTP transport; match that shape (and any `auth:` / "
+        "`post_install:` fields) unless you are adding a newly supported "
+        "transport with maintainer agreement."
     )
     lines.append(
         "3. Set `manifest_version: 1` — the current schema version constant in "
@@ -688,8 +690,8 @@ def render_catalog_page(entries: List[Dict[str, Any]]) -> str:
     # See also
     lines.append("## See also")
     lines.append("")
-    lines.append("- [MCP Config Reference](/reference/mcp-config-reference)")
-    lines.append("- [MCP (Model Context Protocol)](/user-guide/features/mcp)")
+    lines.append("- [MCP Config Reference](./mcp-config-reference.md)")
+    lines.append("- [MCP (Model Context Protocol)](../user-guide/features/mcp.md)")
     lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
@@ -809,7 +811,7 @@ def update_sidebar(entries: List[Dict[str, Any]]) -> None:
     text = _add_reference_entry(text)
     mcp_block = _render_mcp_block(entries)
     text = _replace_or_insert_mcps_block(text, mcp_block)
-    SIDEBAR_PATH.write_text(text, encoding="utf-8")
+    SIDEBAR_PATH.write_text(text, encoding="utf-8", newline="\n")
     print(f"Updated sidebar: {SIDEBAR_PATH}")
 
 
@@ -833,12 +835,12 @@ def main() -> int:
     written = 0
     for entry in entries:
         out_path = MCP_PAGES_DIR / f"{entry['name']}.md"
-        out_path.write_text(render_entry_page(entry), encoding="utf-8")
+        out_path.write_text(render_entry_page(entry), encoding="utf-8", newline="\n")
         written += 1
 
     # Catalog page
     CATALOG_PAGE.parent.mkdir(parents=True, exist_ok=True)
-    CATALOG_PAGE.write_text(render_catalog_page(entries), encoding="utf-8")
+    CATALOG_PAGE.write_text(render_catalog_page(entries), encoding="utf-8", newline="\n")
     print(f"Updated {CATALOG_PAGE}")
 
     # Sidebar
