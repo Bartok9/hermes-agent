@@ -9,15 +9,33 @@ import types
 
 from tools import mcp_tool
 
+_SDK_GLOBALS = (
+    "_MCP_SDK_IMPORT_ATTEMPTED",
+    "_MCP_AVAILABLE",
+    "ClientSession",
+    "_MCP_HTTP_AVAILABLE",
+    "_MCP_NEW_HTTP",
+    "_MCP_LEGACY_HTTP",
+)
+
+
+def _patch_sdk_globals(monkeypatch, **values):
+    for name in _SDK_GLOBALS:
+        if name in values:
+            monkeypatch.setattr(mcp_tool, name, values[name])
+
 
 def test_ensure_mcp_sdk_fast_path_waits_for_http_flags(monkeypatch):
     """A second thread must block on the lock until HTTP/SSE flags are set."""
-    mcp_tool._MCP_SDK_IMPORT_ATTEMPTED = False
-    mcp_tool._MCP_AVAILABLE = True
-    mcp_tool.ClientSession = None
-    mcp_tool._MCP_HTTP_AVAILABLE = False
-    mcp_tool._MCP_NEW_HTTP = False
-    mcp_tool._MCP_LEGACY_HTTP = False
+    _patch_sdk_globals(
+        monkeypatch,
+        _MCP_SDK_IMPORT_ATTEMPTED=False,
+        _MCP_AVAILABLE=True,
+        ClientSession=None,
+        _MCP_HTTP_AVAILABLE=False,
+        _MCP_NEW_HTTP=False,
+        _MCP_LEGACY_HTTP=False,
+    )
 
     real_import = importlib.import_module
     started = threading.Event()
@@ -37,31 +55,34 @@ def test_ensure_mcp_sdk_fast_path_waits_for_http_flags(monkeypatch):
     )
 
     holder_result = {}
-
-    def holder():
-        holder_result["available"] = mcp_tool._ensure_mcp_sdk()
-        holder_result["http"] = mcp_tool._MCP_HTTP_AVAILABLE
-
-    holder_thread = threading.Thread(target=holder)
-    holder_thread.start()
-    assert started.wait(5), "holder never reached HTTP import"
-
     waiter_result = {}
+    holder_thread = threading.Thread(
+        target=lambda: holder_result.update(
+            available=mcp_tool._ensure_mcp_sdk(),
+            http=mcp_tool._MCP_HTTP_AVAILABLE,
+        )
+    )
+    waiter_thread = threading.Thread(
+        target=lambda: waiter_result.update(
+            available=mcp_tool._ensure_mcp_sdk(),
+            http=mcp_tool._MCP_HTTP_AVAILABLE,
+        )
+    )
 
-    def waiter():
-        waiter_result["available"] = mcp_tool._ensure_mcp_sdk()
-        waiter_result["http"] = mcp_tool._MCP_HTTP_AVAILABLE
+    try:
+        holder_thread.start()
+        assert started.wait(5), "holder never reached HTTP import"
 
-    waiter_thread = threading.Thread(target=waiter)
-    waiter_thread.start()
-    time.sleep(0.2)
-    assert waiter_thread.is_alive(), "waiter took the unlocked ClientSession fast path"
-    assert mcp_tool._MCP_HTTP_AVAILABLE is False
-    assert mcp_tool._MCP_SDK_IMPORT_ATTEMPTED is False
+        waiter_thread.start()
+        time.sleep(0.2)
+        assert waiter_thread.is_alive(), "waiter took the unlocked ClientSession fast path"
+        assert mcp_tool._MCP_HTTP_AVAILABLE is False
+        assert mcp_tool._MCP_SDK_IMPORT_ATTEMPTED is False
+    finally:
+        release.set()
+        holder_thread.join(timeout=5)
+        waiter_thread.join(timeout=5)
 
-    release.set()
-    holder_thread.join(timeout=5)
-    waiter_thread.join(timeout=5)
     assert not holder_thread.is_alive()
     assert not waiter_thread.is_alive()
 
@@ -72,10 +93,13 @@ def test_ensure_mcp_sdk_fast_path_waits_for_http_flags(monkeypatch):
     assert mcp_tool._MCP_SDK_IMPORT_ATTEMPTED is True
 
 
-def test_ensure_mcp_sdk_skips_reimport_for_preinstalled_mock():
+def test_ensure_mcp_sdk_skips_reimport_for_preinstalled_mock(monkeypatch):
     """Tests that bind ClientSession before first use must not re-import."""
-    mcp_tool._MCP_SDK_IMPORT_ATTEMPTED = False
-    mcp_tool._MCP_AVAILABLE = True
-    mcp_tool.ClientSession = object()
+    _patch_sdk_globals(
+        monkeypatch,
+        _MCP_SDK_IMPORT_ATTEMPTED=False,
+        _MCP_AVAILABLE=True,
+        ClientSession=object(),
+    )
     assert mcp_tool._ensure_mcp_sdk() is True
     assert mcp_tool._MCP_SDK_IMPORT_ATTEMPTED is False
