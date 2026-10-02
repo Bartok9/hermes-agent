@@ -1572,6 +1572,35 @@ class TestIncomingDocumentHandling:
         assert os.path.exists(msg_event.media_urls[0])
         assert msg_event.media_types == ["application/pdf"]
 
+    @pytest.mark.asyncio
+    async def test_svg_attachment_cached_as_document_not_image(self, adapter):
+        """image/svg+xml is XML, not a raster. It must not hit the image cache
+        (which rejects it and surfaces a misleading scope/auth notice, #131738)."""
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+
+        with patch.object(
+            adapter, "_download_slack_file_bytes", new_callable=AsyncMock
+        ) as dl:
+            dl.return_value = svg
+            event = self._make_event(
+                files=[
+                    {
+                        "mimetype": "image/svg+xml",
+                        "name": "diagram.svg",
+                        "url_private_download": "https://files.slack.com/diagram.svg",
+                        "size": len(svg),
+                    }
+                ]
+            )
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.message_type == MessageType.DOCUMENT
+        assert len(msg_event.media_urls) == 1
+        assert os.path.exists(msg_event.media_urls[0])
+        assert "diagram.svg" in msg_event.media_urls[0]
+        assert "scope" not in (msg_event.text or "").lower()
+        assert "auth" not in (msg_event.text or "").lower()
 
     @pytest.mark.asyncio
     async def test_txt_document_injects_content(self, adapter):

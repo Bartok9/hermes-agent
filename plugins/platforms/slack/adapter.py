@@ -4395,13 +4395,23 @@ class SlackAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _media_message_type(media_types: List[str]) -> MessageType:
-        """PHOTO/VIDEO/VOICE/DOCUMENT by the first matching media prefix; TEXT when none."""
+        """PHOTO/VIDEO/VOICE/DOCUMENT by the first matching media prefix; TEXT when none.
+
+        ``image/svg+xml`` is XML, not a raster. Treating it as PHOTO sends it
+        through the image cache, which rejects it (#131738).
+        """
         if not media_types:
             return MessageType.TEXT
+        normalized = [m.split(";", 1)[0].strip().lower() for m in media_types]
+
+        def _is_raster(mime: str) -> bool:
+            return mime.startswith("image/") and mime != "image/svg+xml"
+
+        if any(_is_raster(m) for m in normalized):
+            return MessageType.PHOTO
         for prefix, kind in (
-            ("image/", MessageType.PHOTO), ("video/", MessageType.VIDEO),
-            ("audio/", MessageType.VOICE)):
-            if any(m.startswith(prefix) for m in media_types):
+            ("video/", MessageType.VIDEO), ("audio/", MessageType.VOICE)):
+            if any(m.startswith(prefix) for m in normalized):
                 return kind
         return MessageType.DOCUMENT
 
@@ -4780,6 +4790,12 @@ class SlackAdapter(BasePlatformAdapter):
     @staticmethod
     def _slack_file_kind(f: Dict[str, Any], mimetype: str) -> str:
         """image / audio / voice clip / video / document, from mimetype (+ voice-clip heuristics)."""
+        # SVG is XML, not a raster. cache_image_from_bytes rejects it and the
+        # collector then reports a misleading scope/auth failure (#131738).
+        mime = (mimetype or "").split(";", 1)[0].strip().lower()
+        name = str(f.get("name") or "").lower()
+        if mime == "image/svg+xml" or name.endswith(".svg"):
+            return "document"
         for prefix in ("image", "audio"):
             if mimetype.startswith(prefix + "/"):
                 return prefix
@@ -6027,7 +6043,9 @@ class SlackAdapter(BasePlatformAdapter):
                         continue
                 mimetype = str(f.get("mimetype") or "")
                 url = f.get("url_private_download") or f.get("url_private", "")
-                if not mimetype.startswith("image/") or not url:
+                mime = mimetype.split(";", 1)[0].strip().lower()
+                # SVG is not a raster; forcing the image cache rejects it (#131738).
+                if not mime.startswith("image/") or mime == "image/svg+xml" or not url:
                     continue
                 try:
                     cached_path, media_type, _ = await self._cache_slack_file(
