@@ -57,14 +57,15 @@ runs:
           echo "$!" > "$RUNNER_TEMP/xvfb.pid"
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
           export DISPLAY=:99
+          # Wait until the display accepts connections; xdpyinfo may not be
+          # installed, so probe with the X socket. Only the display this step
+          # started — a pre-set DISPLAY is already up and is not :99.
+          for _ in $(seq 1 50); do
+            [ -S "/tmp/.X11-unix/X99" ] && break
+            sleep 0.2
+          done
+          [ -S "/tmp/.X11-unix/X99" ] || { echo "Xvfb :99 did not come up" >&2; exit 1; }
         fi
-        # Wait until the display accepts connections; xdpyinfo may not be
-        # installed, so probe with the X socket.
-        for _ in $(seq 1 50); do
-          [ -S "/tmp/.X11-unix/X99" ] && break
-          sleep 0.2
-        done
-        [ -S "/tmp/.X11-unix/X99" ] || { echo "Xvfb :99 did not come up" >&2; exit 1; }
 
     - name: Prepare macOS screen-capture approvals
       if: inputs.mode == 'start' && runner.os == 'macOS'
