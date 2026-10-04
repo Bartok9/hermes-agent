@@ -45,8 +45,9 @@ runs:
       shell: bash
       env:
         CLIENT_ID: ${{ inputs.client-id }}
+        PRIVATE_KEY: ${{ inputs.private-key }}
       run: |
-        if [ -n "$CLIENT_ID" ]; then
+        if [ -n "$CLIENT_ID" ] && [ -n "$PRIVATE_KEY" ]; then
           echo "has_app=true" >> "$GITHUB_OUTPUT"
         else
           echo "has_app=false" >> "$GITHUB_OUTPUT"
