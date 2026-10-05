@@ -673,6 +673,36 @@ class TestBlueBubblesConnectSendOnly:
 
         assert await adapter.connect(send_only=True) is True
         assert adapter._runner is None
+        assert adapter._send_only is True
         await adapter.disconnect()
         adapter._unregister_webhook.assert_not_awaited()
         assert mark_disc == []
+
+    @pytest.mark.asyncio
+    async def test_disconnect_shared_ingress_unregisters_without_runner(self, monkeypatch):
+        """Multiplex secondary: bind_listener returns None, but the profile callback was registered."""
+        import gateway.platforms.shared_ingress as si
+
+        adapter = self._adapter()
+        await self._stub_ping(adapter)
+
+        async def fake_bind(*a, **k):
+            adapter._shared_ingress_url = "http://127.0.0.1:8645/p/secondary/bluebubbles-webhook"
+            return None
+
+        monkeypatch.setattr(si, "bind_listener", fake_bind)
+        adapter._mark_connected = lambda: None  # type: ignore
+        adapter._register_webhook = AsyncMock(return_value=True)  # type: ignore
+        adapter._unregister_webhook = AsyncMock(return_value=True)  # type: ignore
+        adapter._wire_plugin_handlers = lambda _x: None  # type: ignore
+        mark_disc = []
+        adapter._mark_disconnected = lambda: mark_disc.append(True)  # type: ignore
+
+        assert await adapter.connect() is True
+        assert adapter._runner is None
+        assert adapter._send_only is False
+        adapter._register_webhook.assert_awaited_once()
+
+        await adapter.disconnect()
+        adapter._unregister_webhook.assert_awaited_once()
+        assert mark_disc == [True]

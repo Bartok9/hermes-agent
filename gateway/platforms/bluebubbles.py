@@ -128,6 +128,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             extra["mention_patterns"] if "mention_patterns" in extra else _get_scoped_secret("BLUEBUBBLES_MENTION_PATTERNS"))
         self.client: Optional[httpx.AsyncClient] = None
         self._runner = None
+        # Outbound-only callers never own inbound webhook registration.
+        # Distinct from _runner: shared-ingress secondaries also leave _runner
+        # None after publishing onto the multiplex listener, but they DID register.
+        self._send_only = False
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: OrderedDict[str, str] = OrderedDict()
@@ -228,8 +232,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         # overwrite the gateway's runtime status and could delete the webhook
         # the gateway registered. This adapter never created the listener, so
         # it must not manage that lifecycle. disconnect() gates cleanup on
-        # self._runner, which stays None on the send_only path.
+        # self._send_only (not _runner): a multiplex secondary also leaves
+        # _runner None after shared-ingress publish, but it did register a
+        # webhook and must still unregister on disconnect.
         if send_only:
+            self._send_only = True
             return True
 
         # client_max_size makes aiohttp enforce the cap on every read path, incl. chunked requests
@@ -261,12 +268,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             self.client = None
 
     async def disconnect(self) -> None:
-        # Only the adapter instance that owns the webhook lifecycle should
-        # unregister/mark disconnected. send_only adapters leave _runner is None.
-        if self._runner is not None:
+        # send_only adapters share the gateway's webhook URL and must not
+        # unregister it or overwrite runtime status. Shared-ingress secondaries
+        # also have _runner is None (nothing locally bound) but they DID
+        # register a profile callback — distinguish ownership via _send_only,
+        # not _runner.
+        if not self._send_only:
             await self._unregister_webhook()
-            await self._runner.cleanup()
-            self._runner = None
+            if self._runner is not None:
+                await self._runner.cleanup()
+                self._runner = None
             self._mark_disconnected()
         await self._close_client()
 
