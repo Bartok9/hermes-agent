@@ -114,3 +114,30 @@ class TestFileSizeLabel:
 
     def test_nonexistent(self):
         assert _file_size_label("/nonexistent_xyz") == ""
+
+
+class TestExplicitAtPathCrossMount:
+    """@file:/@folder: listings must not crash when relpath raises ValueError.
+
+    Regression for #31915. _get_project_files already skips cross-mount paths;
+    explicit @file:/@folder: listings go through _dir_completions and used to
+    call os.path.relpath unguarded.
+    """
+
+    def test_cross_drive_explicit_file_path_is_skipped(self, monkeypatch, tmp_path):
+        entry_name = "cross.txt"
+        (tmp_path / entry_name).write_text("x")
+        search_dir = str(tmp_path)
+        original_relpath = os.path.relpath
+
+        def patched_relpath(path, start=None):
+            if os.path.basename(str(path)) == entry_name:
+                raise ValueError("path is on mount 'X:', start on mount 'Y:'")
+            return original_relpath(path, start) if start is not None else original_relpath(path)
+
+        monkeypatch.setattr(os.path, "relpath", patched_relpath)
+        completer = SlashCommandCompleter()
+        word = f"@file:{search_dir}/"
+        completions = list(completer._context_completions(word))
+        names = _display_names(completions)
+        assert entry_name not in names
