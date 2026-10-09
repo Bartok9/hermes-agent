@@ -14,7 +14,9 @@ afterEach(cleanup)
  */
 describe('a sent reference renders as the chip the composer showed', () => {
   it('chips a backtick-quoted @url: instead of splitting it into code', () => {
-    render(<UserMessageText text="@url:`https://github.com/NousResearch/hermes-agent/pull/74790` urls lose formatting" />)
+    render(
+      <UserMessageText text="@url:`https://github.com/NousResearch/hermes-agent/pull/74790` urls lose formatting" />
+    )
 
     expect(screen.queryByTitle('https://github.com/NousResearch/hermes-agent/pull/74790')).not.toBeNull()
     // The whole reference is one node — no bare `@url:` text left behind.
@@ -26,6 +28,14 @@ describe('a sent reference renders as the chip the composer showed', () => {
 
     expect(screen.queryByTitle('apps/desktop/my notes.md')).not.toBeNull()
     expect(document.body.textContent).not.toContain('@file:')
+  })
+
+  it('labels a large-paste file as pasted content, keeping its path on hover', () => {
+    const path = '/home/u/.hermes/attachments/pasted_content_2026-09-27_21-33-42-827_55e028-2.txt'
+
+    render(<UserMessageText text={`@file:${path}`} />)
+
+    expect(screen.getByTitle(path).textContent).toBe('Pasted content')
   })
 
   it('chips every kind that travels in message text', () => {
@@ -54,6 +64,13 @@ describe('a sent reference renders as the chip the composer showed', () => {
   it('leaves a fenced block alone', () => {
     render(<UserMessageText text={'before\n```ts\nconst x = 1\n```\nafter'} />)
 
-    expect(document.querySelector('[data-slot="aui_user-fence"]')?.textContent).toBe('const x = 1\n')
+    const fence = document.querySelector('[data-slot="aui_user-fence"]')
+
+    expect(fence?.textContent).toBe('const x = 1\n')
+    // #70451: a wide user fence wraps inside the bubble instead of growing a
+    // horizontal scrollbar under the transcript.
+    expect(fence?.className).toContain('overflow-x-hidden')
+    expect(fence?.className).toContain('whitespace-pre-wrap')
+    expect(fence?.className).not.toContain('overflow-x-auto')
   })
 })
