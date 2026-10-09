@@ -28,10 +28,11 @@ from typing import Any, FrozenSet, Iterable, List, Mapping, Optional, Sequence
 
 from gateway.slash_access import (
     SlashAccessPolicy,
-    _platform_extra,
-    _scope_for_chat_type,
     policy_from_extra,
 )
+
+# Same DM chat types as slash_access.policy_for_source (blank is handled separately).
+_DM_CHAT_TYPES = frozenset({"dm", "direct", "private"})
 
 # Default non-admin toolsets when tier is on and user_toolsets is unset.
 # Intentionally excludes memory, skills, cronjob, delegation, messaging,
@@ -136,6 +137,32 @@ def _platform_extra_from_config(user_config: Mapping[str, Any], platform_key: st
     return merged
 
 
+def _platform_extra(platform_config: Any) -> dict:
+    """``PlatformConfig.extra``, or a bare dict (unit tests / bridged cfg)."""
+    if platform_config is None:
+        return {}
+    extra = getattr(platform_config, "extra", None)
+    if isinstance(extra, dict):
+        return extra
+    return platform_config if isinstance(platform_config, dict) else {}
+
+
+def _policy_for_chat_type(extra: Mapping[str, Any], chat_type: Any) -> SlashAccessPolicy:
+    """Match ``slash_access.policy_for_source`` scope selection.
+
+    A known DM/group chat type uses that scope. Blank/None is ambiguous and
+    resolves to whichever scope is gated (group on a tie) so an empty chat
+    type never lands in an ungated allow-everything scope.
+    """
+    normalized = str(chat_type).strip().lower() if chat_type is not None else ""
+    if normalized:
+        scope = "dm" if normalized in _DM_CHAT_TYPES else "group"
+        return policy_from_extra(dict(extra), scope)
+    dm_policy = policy_from_extra(dict(extra), "dm")
+    group_policy = policy_from_extra(dict(extra), "group")
+    return dm_policy if dm_policy.enabled and not group_policy.enabled else group_policy
+
+
 def policy_for_tier(
     *,
     source: Any,
@@ -146,17 +173,15 @@ def policy_for_tier(
 
     Prefers live ``SessionSource`` + ``PlatformConfig`` when available (gateway);
     falls back to synthetic resolution from ``user_config`` for unit tests.
+    Does not call ``policy_for_source``: that helper re-derives PlatformConfig
+    from ``gateway_config.platforms``, and the turn path already has the
+    resolved platform config.
     """
     if platform_config is not None and source is not None:
         try:
-            # Resolve directly from the live PlatformConfig. We avoid
-            # slash_access.policy_for_source here because its signature is
-            # policy_for_source(gateway_config, source) and it re-derives the
-            # PlatformConfig from gateway_config.platforms; callers on the
-            # gateway path already hand us the resolved PlatformConfig.
-            extra = _platform_extra(platform_config)
-            scope = _scope_for_chat_type(getattr(source, "chat_type", None))
-            return policy_from_extra(extra, scope)
+            return _policy_for_chat_type(
+                _platform_extra(platform_config), getattr(source, "chat_type", None),
+            )
         except Exception:
             pass
     if user_config is None or source is None:
@@ -165,12 +190,9 @@ def policy_for_tier(
         getattr(source, "platform", "") or ""
     )
     if hasattr(source, "platform") and hasattr(source.platform, "name"):
-        # Platform enum — config keys are usually lowercase names
         platform_key = source.platform.value if hasattr(source.platform, "value") else source.platform.name.lower()
     extra = _platform_extra_from_config(user_config, platform_key)
-    chat_type = (getattr(source, "chat_type", None) or "dm") or "dm"
-    scope = "group" if str(chat_type).lower() not in ("dm", "private", "direct") else "dm"
-    return policy_from_extra(extra, scope)
+    return _policy_for_chat_type(extra, getattr(source, "chat_type", None))
 
 
 def filter_toolsets_for_user(
