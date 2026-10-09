@@ -5,6 +5,7 @@ management, export/import, renaming, alias collision checks, profile isolation,
 and shell completion generation.
 """
 
+import io
 import json
 import os
 import shutil
@@ -37,6 +38,7 @@ from hermes_cli.profiles import (
     remove_wrapper_script,
     rename_profile,
     export_profile,
+    import_profile,
     _get_default_hermes_home,
     NO_BUNDLED_SKILLS_MARKER,
     backfill_profile_envs,
